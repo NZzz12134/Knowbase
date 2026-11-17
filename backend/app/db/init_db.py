@@ -1,13 +1,13 @@
-"""建表 + 幂等种子数据（admin/123456）。"""
+"""建表与旧版本数据迁移。新安装通过注册创建账号，无预置特权账号。"""
 import logging
 
-from sqlalchemy import select
+from sqlalchemy import select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.security import hash_password
 from app.db.base import Base
 from app.db.session import engine
-from app.models import User
+from app.models import ModelConfig, User, UserModelConfig
 
 logger = logging.getLogger(__name__)
 
@@ -21,7 +21,7 @@ async def create_tables() -> None:
 
 
 async def seed_admin(db: AsyncSession) -> None:
-    """幂等：admin 不存在则创建（role=admin）。"""
+    """测试/旧脚本兼容账号，无特殊权限；生产初始化不调用。"""
     result = await db.execute(select(User).where(User.username == ADMIN_USERNAME))
     if result.scalar_one_or_none() is not None:
         return
@@ -29,13 +29,23 @@ async def seed_admin(db: AsyncSession) -> None:
         User(
             username=ADMIN_USERNAME,
             hashed_password=hash_password(ADMIN_PASSWORD),
-            role="admin",
         )
     )
     await db.commit()
-    logger.info("Seeded admin user (please change password after first login!)")
+    logger.info("Created compatibility account")
+
+
+async def migrate_legacy_roles(db: AsyncSession) -> None:
+    """Copy existing encrypted model settings to former owners before retiring role flags."""
+    legacy = await db.get(ModelConfig, 1)
+    owners = (await db.execute(select(User).where(User.role == "admin"))).scalars().all()
+    for user in owners:
+        if legacy is not None and await db.get(UserModelConfig, user.id) is None:
+            db.add(UserModelConfig(user_id=user.id, revision=legacy.revision, config=legacy.config))
+    await db.execute(update(User).where(User.role != "user").values(role="user"))
+    await db.commit()
 
 
 async def init_db(db: AsyncSession) -> None:
     await create_tables()
-    await seed_admin(db)
+    await migrate_legacy_roles(db)

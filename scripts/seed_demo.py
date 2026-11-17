@@ -62,4 +62,4 @@ iOS 10 以上、Android 8 以上；可同时连接两台设备并自动切换。
 if __name__ == "__main__":
     gen_excel()
     gen_markdown()
-    print("done —— 在管理后台将两个文件上传到知识库即可体验")
+    print("done —— 在个人知识空间将两个文件上传到知识库即可体验")

@@ -4,13 +4,12 @@ import logging
 import uuid
 from dataclasses import dataclass, field
 
-from app.core.config import get_settings
 from app.services.providers.rerank import rerank as rerank_api
 from app.services.rag import vector_store
 from app.services.rag.bm25 import bm25_manager
+from app.services.model_config_service import get_model_settings
 
 logger = logging.getLogger(__name__)
-settings = get_settings()
 
 
 @dataclass
@@ -27,6 +26,7 @@ async def hybrid_retrieve(
     query_embedding: list[float] | None = None,
 ) -> list[RetrievedChunk]:
     """返回融合排序后的引用块列表（已截断 top_k / rerank top_n）。"""
+    settings = get_model_settings()
     mode = settings.RETRIEVAL_MODE
     results: dict[str, RetrievedChunk] = {}
 
@@ -66,8 +66,8 @@ async def hybrid_retrieve(
     else:
         chunks = sorted(results.values(), key=lambda c: c.score, reverse=True)
 
-    # BM25-only 结果的 text 为空 → 从 DB 回填
-    await _fill_texts(chunks)
+    # Load canonical text and source metadata only after checking live ownership.
+    await _authorize_chunks(chunks)
 
     # ---- Rerank ----
     if settings.RERANK_ENABLED and len(chunks) > 1:
@@ -87,6 +87,7 @@ async def _rrf_fuse(
     candidates: list[RetrievedChunk],
 ) -> list[RetrievedChunk]:
     """RRF：score = Σ 1/(k + rank)，k=60。重新跑两路取排名。"""
+    settings = get_model_settings()
     k = settings.RRF_K
     rrf: dict[str, float] = {}
 
@@ -138,10 +139,30 @@ async def _fill_texts(chunks: list[RetrievedChunk]) -> None:
 
 
 async def _all_kb_ids() -> list[uuid.UUID]:
+    from app.services.personal_access import current_scope
+    return list(current_scope()[1])
+
+
+async def _authorize_chunks(chunks):
     from sqlalchemy import select
-
     from app.db.session import SessionLocal
-    from app.models import KnowledgeBase
-
+    from app.models import Chunk, Document, KnowledgeBase
+    from app.services.personal_access import current_scope
+    user_id, kb_ids = current_scope()
+    if not user_id or not kb_ids:
+        chunks.clear()
+        return
     async with SessionLocal() as db:
-        return list((await db.execute(select(KnowledgeBase.id))).scalars().all())
+        rows = (await db.execute(select(Chunk, Document).join(Document, Document.id == Chunk.document_id)
+            .join(KnowledgeBase, KnowledgeBase.id == Chunk.kb_id)
+            .where(Chunk.id.in_([uuid.UUID(c.id) for c in chunks]), Chunk.kb_id.in_(kb_ids),
+                   KnowledgeBase.created_by == uuid.UUID(user_id), KnowledgeBase.is_active.is_(True),
+                   Document.deleted_at.is_(None), Document.parse_status == "succeeded"))).all()
+    allowed = {str(row.id): (row, doc) for row, doc in rows}
+    chunks[:] = [c for c in chunks if c.id in allowed]
+    for c in chunks:
+        row, doc = allowed[c.id]
+        c.text = row.content
+        c.metadata = {"document_id": str(doc.id), "kb_id": str(row.kb_id), "filename": doc.filename,
+                      "file_type": doc.file_type, "source": doc.source_url, "page": row.page_number,
+                      "row_start": row.row_start, "row_end": row.row_end, "heading_path": row.heading_path}

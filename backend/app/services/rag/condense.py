@@ -9,8 +9,6 @@ from app.services.rag.prompts import CONDENSE_PROMPT
 
 logger = logging.getLogger(__name__)
 
-_condense_chain = CONDENSE_PROMPT | get_llm() | StrOutputParser()
-
 
 async def condense_question(history: list[dict], question: str) -> str:
     """history: [{"role": "user"/"assistant", "content": str}] 最近 3 轮，时间正序。"""
@@ -21,7 +19,8 @@ async def condense_question(history: list[dict], question: str) -> str:
         for m in history[-6:]  # 最近 3 轮
     ]
     try:
-        standalone = await _condense_chain.ainvoke(
+        chain = CONDENSE_PROMPT | get_llm() | StrOutputParser()
+        standalone = await chain.ainvoke(
             {"history": messages, "question": question}
         )
         return standalone.strip() or question

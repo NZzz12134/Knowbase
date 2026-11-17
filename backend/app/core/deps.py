@@ -1,4 +1,4 @@
-"""FastAPI 依赖：数据库会话、当前用户、管理员校验。"""
+"""FastAPI 依赖：数据库会话、当前用户与资料所有权。"""
 import uuid
 from typing import AsyncGenerator
 
@@ -41,13 +41,6 @@ async def get_current_user(
     if user is None or not user.is_active:
         raise BusinessError("unauthorized", "账号不存在或已被禁用", 401)
     request.state.user_id = str(user.id)
-    return user
-
-
-async def require_admin(user: User = Depends(get_current_user)) -> User:
-    """管理员专用依赖：非 admin 返回 403（后端强制校验，前端隐藏仅为体验）。"""
-    if user.role != "admin":
-        raise BusinessError("forbidden", "无权访问该资源", 403)
     return user
 
 

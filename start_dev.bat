@@ -29,6 +29,7 @@ timeout /t 10 /nobreak >nul
 start http://localhost:5173
 
 echo.
-echo Admin login: admin / 123456  (top-right menu - Knowledge Base Admin)
+echo Create your own account on the registration page. No default account is created.
+echo Models can be configured later in your personal workspace.
 echo Stop all services: run stop_dev.bat
 pause

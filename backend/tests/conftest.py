@@ -35,6 +35,7 @@ def _prepare_db():
             await conn.run_sync(Base.metadata.create_all)
         async with SessionLocal() as db:
             await seed_admin(db)
+        await engine.dispose()
 
     asyncio.run(_setup())
     yield
@@ -55,6 +56,7 @@ async def _reset_redis_per_test():
     except Exception:
         pass
     get_redis.cache_clear()
+    await engine.dispose()
 
 
 @pytest.fixture

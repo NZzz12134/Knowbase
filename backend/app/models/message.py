@@ -26,6 +26,5 @@ class Message(Base, UUIDPkMixin):
     )
     token_usage: Mapped[dict[str, Any] | None] = mapped_column(JSON, nullable=True)
     error_message: Mapped[str | None] = mapped_column(Text, nullable=True)
-    # DATETIME(6) 微秒精度：同会话内消息排序的稳定性来源
-    # （MySQL DATETIME 默认秒级精度会导致同秒的提问/回答乱序）
+    # 服务层保证同会话时间递增；旧的相同时间记录由统一排序规则兜底。
     created_at: Mapped[datetime] = mapped_column(DATETIME(fsp=6), nullable=False, default=utcnow)

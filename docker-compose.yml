@@ -1,6 +1,6 @@
 # 生产全栈部署：nginx(frontend) + backend + worker + mysql + redis + chroma server
 # 启动：docker compose up -d
-# 注意：Chroma 用 server 模式，需在 .env 设置 CHROMA_MODE=server CHROMA_HOST=chroma CHROMA_PORT=8001
+# Chroma 的容器内地址由下面的 environment 覆盖；.env 中只需填写 CHROMA_TOKEN。
 services:
   frontend:
     build: ./frontend
@@ -17,7 +17,7 @@ services:
       - REDIS_URL=redis://redis:6379/0
       - CHROMA_MODE=server
       - CHROMA_HOST=chroma
-      - CHROMA_PORT=8001
+      - CHROMA_PORT=8000
       - CHROMA_TOKEN=${CHROMA_TOKEN}
     volumes:
       - documents_data:/app/storage
@@ -43,7 +43,7 @@ services:
       - REDIS_URL=redis://redis:6379/0
       - CHROMA_MODE=server
       - CHROMA_HOST=chroma
-      - CHROMA_PORT=8001
+      - CHROMA_PORT=8000
       - CHROMA_TOKEN=${CHROMA_TOKEN}
     volumes:
       - documents_data:/app/storage
@@ -90,10 +90,11 @@ services:
     environment:
       - IS_PERSISTENT=TRUE
       - ANONYMIZED_TELEMETRY=FALSE
-      - CHROMA_SERVER_AUTHN_PROVIDER=token
+      - CHROMA_SERVER_AUTHN_PROVIDER=chromadb.auth.token_authn.TokenAuthenticationServerProvider
       - CHROMA_SERVER_AUTHN_CREDENTIALS=${CHROMA_TOKEN:?生产环境请在 .env 设置随机 CHROMA_TOKEN}
+      - CHROMA_AUTH_TOKEN_TRANSPORT_HEADER=X-Chroma-Token
     healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:8001/api/v2/heartbeat"]
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/api/v1/heartbeat', timeout=3).read()"]
       interval: 10s
       timeout: 5s
       retries: 5

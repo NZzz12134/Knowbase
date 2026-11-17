@@ -1,6 +1,6 @@
 """文档解析任务：Celery 执行 load → chunk → embed → Chroma 入库。
 
-关键点：worker 每任务用 asyncio.run 新建事件循环，而 get_embeddings/get_redis
+关键点：worker 每任务用 asyncio.run 新建事件循环，而 get_redis
 等是进程级 lru_cache 单例（内含绑定 loop 的客户端）——任务开始/结束必须清理，
 否则第二个任务复用绑定已关闭 loop 的客户端会挂起/崩溃。
 """
@@ -14,11 +14,9 @@ logger = logging.getLogger(__name__)
 def _reset_loop_bound_singletons() -> None:
     """清掉绑定旧事件循环的单例，让本任务在新 loop 上重建客户端。"""
     from app.core.redis_client import get_redis
-    from app.services.providers.embeddings import get_embeddings
     from app.services.providers.rerank import _client
 
     get_redis.cache_clear()
-    get_embeddings.cache_clear()
     _client.cache_clear()
 
 

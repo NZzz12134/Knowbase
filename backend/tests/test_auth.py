@@ -24,7 +24,7 @@ async def test_register_login_flow(client):
     data = resp.json()
     assert data["access_token"]
     assert data["user"]["username"] == "flowuser"
-    assert data["user"]["role"] == "user"
+    assert "role" not in data["user"]
 
     # 重复注册 409
     resp = await client.post(
@@ -40,11 +40,14 @@ async def test_register_login_flow(client):
     )
     assert resp.status_code == 200
     token = resp.json()["access_token"]
+    from app.core.security import decode_access_token
+    assert "role" not in decode_access_token(token)
 
     # me
     resp = await client.get("/api/v1/auth/me", headers={"Authorization": f"Bearer {token}"})
     assert resp.status_code == 200
     assert resp.json()["username"] == "flowuser"
+    assert "role" not in resp.json()
 
 
 async def test_wrong_password(client):
@@ -85,19 +88,20 @@ async def test_change_password(client):
     assert resp.status_code == 200
 
 
-async def test_admin_seed_and_rbac(client):
-    # admin 种子存在
+async def test_legacy_account_has_same_capabilities(client):
+    # 测试兼容账号仍可登录，但不再返回特权身份。
     resp = await client.post("/api/v1/auth/login", json={"username": "admin", "password": "123456"})
     assert resp.status_code == 200
-    assert resp.json()["user"]["role"] == "admin"
+    assert "role" not in resp.json()["user"]
 
-    # 普通用户访问管理接口 → 403
+    # 任意账号都可使用旧接口别名；数据仍限定自己的知识库。
     resp = await client.post(
         "/api/v1/auth/register", json={"username": "rbacuser", "password": "abc12345"}
     )
     token = resp.json()["access_token"]
     resp = await client.get("/api/v1/admin/kbs", headers={"Authorization": f"Bearer {token}"})
-    assert resp.status_code == 403
+    assert resp.status_code == 200
+    assert resp.json() == []
 
     # 无 token → 401
     resp = await client.get("/api/v1/admin/kbs")

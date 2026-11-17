@@ -4,10 +4,11 @@
       <el-icon><Document /></el-icon>
       <span>引用来源（{{ citations.length }}）</span>
     </div>
-    <div
+    <button
       v-for="(c, idx) in citations"
       :key="c.id"
       class="citation-item"
+      type="button"
       @click="showDetail(c)"
     >
       <span class="citation-badge">{{ idx + 1 }}</span>
@@ -20,7 +21,7 @@
         </div>
         <div class="citation-text">{{ c.text }}</div>
       </div>
-    </div>
+    </button>
 
     <el-dialog v-model="detailVisible" title="引用片段详情" width="640px">
       <div class="detail-meta">
@@ -31,13 +32,17 @@
         <div v-if="detail?.score != null"><b>相关度：</b>{{ (detail.score * 100).toFixed(1) }}%</div>
       </div>
       <div class="detail-text">{{ detail?.text }}</div>
+      <el-button v-if="detail?.document_id" type="primary" style="margin-top:16px" @click="originalPreview.open(detail)">查看原文{{ detail.page ? ` · 第 ${detail.page} 页` : '' }}</el-button>
     </el-dialog>
+    <DocumentPreview ref="originalPreview" />
   </div>
 </template>
 
 <script setup>
 import { ref } from 'vue'
 import { Document } from '@element-plus/icons-vue'
+import DocumentPreview from '../DocumentPreview.vue'
+const originalPreview = ref(null)
 
 defineProps({
   citations: { type: Array, default: () => [] },
@@ -69,19 +74,23 @@ function showDetail(citation) {
   margin-bottom: 8px;
 }
 .citation-item {
+  width: 100%;
+  text-align: left;
+  background: transparent;
+  border: 0;
   display: flex;
   gap: 8px;
   padding: 6px 0;
   cursor: pointer;
-  border-top: 1px dashed #e2e8f0;
+  border-top: 1px dashed #dce4d5;
 }
 .citation-item:first-of-type { border-top: none; }
-.citation-item:hover .citation-text { color: #409eff; }
+.citation-item:hover .citation-text { color: var(--accent); }
 .citation-badge {
   width: 20px;
   height: 20px;
   min-width: 20px;
-  background: #409eff;
+  background: var(--accent);
   color: #fff;
   border-radius: 50%;
   font-size: 12px;

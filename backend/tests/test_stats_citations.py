@@ -1,4 +1,4 @@
-"""统计接口与引用详情测试：admin 权限、引用溯源数据结构。"""
+"""个人统计与引用详情测试：登录要求、数据隔离、引用溯源数据结构。"""
 import uuid
 
 import pytest
@@ -45,27 +45,27 @@ async def _admin_token(client):
     return resp.json()["access_token"]
 
 
-async def test_stats_overview_admin_only(client):
+async def test_stats_available_to_every_account(client):
     admin = await _admin_token(client)
     user = await _register(client, "statsuser")
 
-    # 普通用户 403
+    # 旧后台地址是个人统计的兼容别名。
     resp = await client.get("/api/v1/admin/stats/overview", headers={"Authorization": f"Bearer {user}"})
-    assert resp.status_code == 403
+    assert resp.status_code == 200
+    assert resp.json()["kb_count"] == 0
 
-    # admin 正常，字段齐全
-    resp = await client.get("/api/v1/admin/stats/overview", headers={"Authorization": f"Bearer {admin}"})
+    resp = await client.get("/api/v1/me/stats/overview", headers={"Authorization": f"Bearer {admin}"})
     assert resp.status_code == 200
     data = resp.json()
     for key in (
-        "user_count", "session_count", "message_count", "document_count",
+        "session_count", "message_count", "document_count",
         "chunk_count", "kb_count", "today_qa", "parse_success_rate",
         "feedback_like", "feedback_dislike",
     ):
         assert key in data
 
-    # 数值正确性：至少 admin + statsuser 两个用户
-    assert data["user_count"] >= 2
+    assert "user_count" not in data and "admin_count" not in data
+    assert (await client.get("/api/v1/me/stats/overview")).status_code == 401
 
 
 async def test_daily_qa_shape(client):
@@ -75,6 +75,42 @@ async def test_daily_qa_shape(client):
     data = resp.json()
     assert len(data) == 30
     assert set(data[0].keys()) == {"day", "questions", "answers", "likes", "dislikes"}
+
+
+async def test_personal_stats_and_legacy_alias_isolate_accounts(client, db_session):
+    from app.models import ChatSession, Chunk, Document, Feedback, KnowledgeBase, Message, User
+    owner = await _admin_token(client)
+    other = await _register(client, "statsisolated")
+    owner_id = await db_session.scalar(select(User.id).where(User.username == "admin"))
+    kb = KnowledgeBase(name="private stats", created_by=owner_id)
+    db_session.add(kb)
+    await db_session.flush()
+    doc = Document(kb_id=kb.id, filename="stats.txt", file_path="stats.txt", file_type="txt", parse_status="succeeded", uploaded_by=owner_id)
+    session = ChatSession(user_id=owner_id, title="private stats")
+    db_session.add_all([doc, session])
+    await db_session.flush()
+    db_session.add(Chunk(document_id=doc.id, kb_id=kb.id, seq=0, content="private", content_hash="stats"))
+    answer = Message(session_id=session.id, role="assistant", content="answer")
+    db_session.add_all([Message(session_id=session.id, role="user", content="question"), answer])
+    await db_session.flush()
+    db_session.add(Feedback(message_id=answer.id, user_id=owner_id, rating="like"))
+    await db_session.commit()
+
+    for prefix in ("/api/v1/me/stats", "/api/v1/admin/stats"):
+        for token, owns_data in ((owner, True), (other, False)):
+            headers = {"Authorization": f"Bearer {token}"}
+            data = (await client.get(prefix + "/overview", headers=headers)).json()
+            for field in ("kb_count", "document_count", "chunk_count", "session_count", "assistant_answer_count", "feedback_like"):
+                assert data[field] == int(owns_data), (prefix, field, data)
+            assert data["message_count"] == (2 if owns_data else 0)
+            daily = (await client.get(prefix + "/daily-qa", headers=headers)).json()
+            assert sum(day["questions"] for day in daily) == int(owns_data)
+            assert sum(day["answers"] for day in daily) == int(owns_data)
+            assert sum(day["likes"] for day in daily) == int(owns_data)
+            docs = (await client.get(prefix + "/documents", headers=headers)).json()
+            assert len(docs) == int(owns_data)
+            if owns_data:
+                assert docs[0]["kb_id"] == str(kb.id)
 
 
 async def test_citations_detail_structure(client, db_session):

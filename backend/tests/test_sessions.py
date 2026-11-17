@@ -81,7 +81,7 @@ async def test_session_ownership_isolation(client, db_session):
 
 
 async def test_message_history_order_and_preview(client, db_session):
-    """历史按 seq 正序；列表预览为最后一条消息。"""
+    """历史按时间正序；列表预览为最后一条消息。"""
     from app.db.base import utcnow
     from app.models import ChatSession, Message, User
 
@@ -132,3 +132,68 @@ async def test_invalid_session_404(client):
         f"/api/v1/sessions/{fake_id}/messages", headers={"Authorization": f"Bearer {token}"}
     )
     assert resp.status_code == 404
+
+
+async def test_equal_timestamps_history_pagination_and_preview(client, db_session):
+    """复现问题与回复同一微秒且 UUID 逆序，验证历史、分页、上下文及预览。"""
+    from datetime import datetime, timedelta
+    from sqlalchemy import select
+    from app.models import ChatSession, Message, User
+    from app.services.message_service import get_recent_history
+
+    token = await _register(client, "tiedtimeuser")
+    user = await db_session.scalar(select(User).where(User.username == "tiedtimeuser"))
+    session = ChatSession(user_id=user.id, title="相同时间")
+    other = ChatSession(user_id=user.id, title="另一会话")
+    db_session.add_all([session, other])
+    await db_session.flush()
+    now = datetime(2026, 11, 17, 1, 43, 16, 280521)
+    for i, (role, content) in enumerate([
+        ("user", "问题1"), ("assistant", "回答1"),
+        ("user", "问题2"), ("assistant", "回答2"),
+    ]):
+        db_session.add(Message(
+            id=uuid.UUID(int=100 - i), session_id=session.id, role=role, content=content,
+            created_at=now + timedelta(seconds=i // 2),
+        ))
+    db_session.add(Message(session_id=other.id, role="user", content="另一会话的问题", created_at=now + timedelta(seconds=1)))
+    await db_session.commit()
+    headers = {"Authorization": f"Bearer {token}"}
+    url = f"/api/v1/sessions/{session.id}/messages"
+    expected = ["问题1", "回答1", "问题2", "回答2"]
+    for _ in range(2):
+        response = await client.get(url, headers=headers)
+        assert [m["content"] for m in response.json()["items"]] == expected
+    pages = []
+    for page in range(1, 5):
+        response = await client.get(url, params={"page": page, "page_size": 1}, headers=headers)
+        pages.extend(m["content"] for m in response.json()["items"])
+    assert pages == expected
+    assert [m["content"] for m in await get_recent_history(db_session, session.id, 3)] == expected[-3:]
+    response = await client.get("/api/v1/sessions", headers=headers)
+    previews = {m["id"]: m["last_message_preview"] for m in response.json()["items"]}
+    assert previews[str(session.id)] == "回答2"
+    assert previews[str(other.id)] == "另一会话的问题"
+
+
+async def test_new_messages_order_when_clock_does_not_advance(client, db_session, monkeypatch):
+    from datetime import datetime
+    from sqlalchemy import select
+    from app.models import ChatSession, User
+    from app.services import message_service
+
+    await _register(client, "fixedclockuser")
+    user = await db_session.scalar(select(User).where(User.username == "fixedclockuser"))
+    session = ChatSession(user_id=user.id)
+    db_session.add(session)
+    await db_session.commit()
+    now = datetime(2026, 11, 17, 1, 43, 16, 280521)
+    monkeypatch.setattr(message_service, "utcnow", lambda: now)
+    messages = []
+    for question in ("问题1", "问题2"):
+        messages.append(await message_service.create_user_message(db_session, session.id, question))
+        messages.append(await message_service.create_assistant_placeholder(db_session, session.id))
+    await db_session.commit()
+    timestamps = [m.created_at for m in messages]
+    assert timestamps[0] == now
+    assert all(a < b for a, b in zip(timestamps, timestamps[1:]))

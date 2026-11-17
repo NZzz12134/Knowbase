@@ -1,54 +1,58 @@
 <template>
   <div class="chat-layout">
-    <SessionSidebar @changed="onSessionChanged" />
+    <SessionSidebar :open="sidebarOpen" @close="sidebarOpen = false" @changed="onSessionChanged" />
 
-    <div class="chat-main">
-      <div class="chat-header">
+    <main id="main-content" tabindex="-1" class="chat-main" :inert="sidebarOpen">
+      <header class="chat-header">
         <div class="header-left">
-          <b>{{ currentTitle }}</b>
-          <el-tag v-if="currentKbName" size="small" type="info" style="margin-left: 8px">
-            知识库：{{ currentKbName }}
-          </el-tag>
+          <button class="icon-button mobile-menu" aria-label="打开会话列表" :aria-expanded="sidebarOpen" @click="sidebarOpen = true"><el-icon aria-hidden="true"><Fold /></el-icon></button>
+          <span class="workspace-label">知识对话</span><span class="header-slash" aria-hidden="true">/</span>
+          <h1>{{ currentTitle }}</h1>
         </div>
         <div class="header-right">
+          <span class="scope-pill"><span></span>{{ currentKbName || '全部知识库' }}</span>
           <el-dropdown @command="onCommand">
-            <span class="user-chip">
-              <el-avatar :size="26">{{ userInitial }}</el-avatar>
-              {{ auth.user?.username }}
-              <el-icon><ArrowDown /></el-icon>
-            </span>
+            <button class="user-chip" aria-label="打开账户菜单">
+              <el-avatar :size="29">{{ userInitial }}</el-avatar><span class="user-name">{{ auth.user?.username }}</span><el-icon aria-hidden="true"><ArrowDown /></el-icon>
+            </button>
             <template #dropdown>
               <el-dropdown-menu>
+                <el-dropdown-item command="space">我的知识空间</el-dropdown-item>
+                <el-dropdown-item command="models">我的模型设置</el-dropdown-item>
                 <el-dropdown-item command="profile">个人中心 / 修改密码</el-dropdown-item>
-                <el-dropdown-item v-if="auth.isAdmin" command="admin" divided>知识库管理后台</el-dropdown-item>
                 <el-dropdown-item command="logout" divided>退出登录</el-dropdown-item>
               </el-dropdown-menu>
             </template>
           </el-dropdown>
         </div>
-      </div>
+      </header>
 
+      <FirstSteps @ready="refreshKnowledge" @models-ready="modelsReady = $event" />
       <MessageList
         ref="messageListRef"
         :messages="messages"
         :streaming="isStreaming"
+        :loading="isLoadingMessages"
+        :disabled="isStreaming || isLoadingMessages || !modelsReady"
         @feedback="onFeedback"
         @quick-ask="onSend"
+        @retry="retryAnswer"
       />
 
-      <ChatInput :disabled="isStreaming" @send="onSend" />
-    </div>
+      <ChatInput :disabled="isStreaming || isLoadingMessages || !modelsReady" :streaming="isStreaming" @stop="stopCurrentStream" @send="onSend" />
+    </main>
   </div>
 </template>
 
 <script setup>
-import { computed, onMounted, ref } from 'vue'
-import { ArrowDown } from '@element-plus/icons-vue'
+import { computed, onBeforeUnmount, onMounted, reactive, ref } from 'vue'
+import { ArrowDown, Fold } from '@element-plus/icons-vue'
 import { useRouter } from 'vue-router'
 import { chatApi } from '../api/chat'
 import { kbApi } from '../api/admin'
 import { sessionApi } from '../api/session'
 import ChatInput from '../components/chat/ChatInput.vue'
+import FirstSteps from '../components/FirstSteps.vue'
 import MessageList from '../components/chat/MessageList.vue'
 import SessionSidebar from '../components/chat/SessionSidebar.vue'
 import { useAuthStore } from '../stores/auth'
@@ -59,10 +63,16 @@ const auth = useAuthStore()
 const sessionStore = useSessionStore()
 
 const messages = ref([])
+const modelsReady = ref(false)
+const sidebarOpen = ref(false)
+const isLoadingMessages = ref(true)
 // 当前活动流的会话 id；null = 无流。绑定到会话而非全局，切换会话时可中止旧流
 const streamingSessionId = ref(null)
 let currentStreamAbort = null
 let loadSeq = 0 // loadMessages 竞态守卫：只接受最新一次请求的结果
+let localMessageId = 0
+let displayedSessionId = null
+let scrollFrame = 0
 
 const kbs = ref([])
 const messageListRef = ref(null)
@@ -99,34 +109,66 @@ onMounted(async () => {
     }
   } catch (_) {
     /* 拦截器已提示 */
+  } finally {
+    isLoadingMessages.value = false
   }
 })
 
 /** 加载历史消息（带竞态守卫：快速切换会话时旧响应被丢弃） */
 async function loadMessages(sessionId) {
   const seq = ++loadSeq
-  const data = await sessionApi.messages(sessionId, { page: 1, page_size: 200 })
-  if (seq !== loadSeq) return // 已有更新的加载请求
-  messages.value = data.items.map((m) => ({ ...m, citations: [] }))
-  scrollToBottom(false)
+  isLoadingMessages.value = true
+  try {
+    const data = await sessionApi.messages(sessionId, { page: 1, page_size: 200 })
+    if (seq !== loadSeq || sessionStore.currentId !== sessionId) return
+    displayedSessionId = sessionId
+    messages.value = data.items.map((m) => ({ ...m, _key: m.id, citations: [] }))
+    scrollToBottom(false)
+  } finally {
+    if (seq === loadSeq) isLoadingMessages.value = false
+  }
 }
 
 /** 侧边栏会话切换 / 新建 / 删除：中止不属于目标会话的流，重载消息区 */
 async function onSessionChanged(sessionId) {
+  sidebarOpen.value = false
+  // 点击当前会话时保留正在流式更新的消息，避免历史响应覆盖它。
+  if (sessionId && displayedSessionId === sessionId && streamingSessionId.value === sessionId) return
   if (streamingSessionId.value && streamingSessionId.value !== sessionId) {
     currentStreamAbort?.()
   }
   if (sessionId) {
+    displayedSessionId = null
+    messages.value = []
     await loadMessages(sessionId)
   } else {
+    displayedSessionId = null
     loadSeq++ // 使在途的旧加载结果失效
+    isLoadingMessages.value = false
     messages.value = []
   }
 }
 
-async function onSend(question) {
+function refreshKnowledge() { kbApi.list().then(data => { kbs.value = data }).catch(() => {}) }
+
+async function retryAnswer(message) {
+  if (!modelsReady.value || isStreaming.value || isLoadingMessages.value || message !== messages.value.at(-1)) return
+  const question = messages.value.at(-2)?.content
+  if (!question) return
+  if (!message.id) {
+    try {
+      const data = await sessionApi.messages(sessionStore.currentId, { page: 1, page_size: 200 })
+      const last = data.items.at(-1)
+      if (last?.role === 'assistant' && data.items.at(-2)?.content === question) message.id = last.id
+      else { messages.value.splice(-2, 2); await onSend(question); return }
+    } catch (_) { return }
+  }
+  await onSend(question, message)
+}
+
+async function onSend(question, retryMessage = null) {
   // 并发保护：流进行中直接拒绝（双 Enter/连点场景）
-  if (streamingSessionId.value) return
+  if (!modelsReady.value || isStreaming.value || isLoadingMessages.value) return
   streamingSessionId.value = '' // 先占位，防 createSession 网络窗口期重复进入
 
   try {
@@ -135,37 +177,39 @@ async function onSend(question) {
       await sessionStore.createSession()
     }
     const sessionId = sessionStore.currentId
+    displayedSessionId = sessionId
     streamingSessionId.value = sessionId
 
-    const userMsg = { role: 'user', content: question, status: 'completed' }
-    const assistantMsg = {
+    const userMsg = reactive({ _key: `local-${++localMessageId}`, role: 'user', content: question, status: 'completed' })
+    const assistantMsg = reactive({
+      _key: `local-${++localMessageId}`,
       role: 'assistant',
       content: '',
       status: 'generating',
       citations: [],
       feedback: null,
-    }
-    messages.value.push(userMsg, assistantMsg)
+    })
+    if (retryMessage) {
+      assistantMsg.id = retryMessage.id
+      messages.value.splice(-1, 1, assistantMsg)
+    } else messages.value.push(userMsg, assistantMsg)
     scrollToBottom()
 
-    const { abort, promise } = chatApi.stream(sessionId, question)
-    currentStreamAbort = abort
-
     const stopStreaming = () => {
-      abort()
+      currentStreamAbort?.()
       assistantMsg.status = assistantMsg.content ? 'stopped' : 'failed'
       assistantMsg.error_message = '已停止生成'
     }
     assistantMsg._stop = stopStreaming
-
-    try {
-      const events = await promise
-      for (const ev of events) {
-        if (ev.event === 'citations') {
+    const applyEvent = (ev) => {
+        if (ev.event === 'start') {
+          assistantMsg.id = ev.data?.message_id
+        } else if (ev.event === 'citations') {
           assistantMsg.citations = ev.data?.citations || []
+          assistantMsg.answer_mode = ev.data?.answer_mode || (assistantMsg.citations.length ? 'knowledge' : 'general')
         } else if (ev.event === 'token') {
           assistantMsg.content += ev.data?.content || ''
-          scrollToBottom(true)
+          scrollToBottom(false)
         } else if (ev.event === 'done') {
           assistantMsg.id = ev.data?.message_id
           assistantMsg.status = 'completed'
@@ -174,7 +218,11 @@ async function onSend(question) {
           assistantMsg.status = 'failed'
           assistantMsg.error_message = ev.data?.message || '生成失败'
         }
-      }
+    }
+    const { abort, promise } = chatApi.stream(sessionId, question, applyEvent, retryMessage?.id)
+    currentStreamAbort = abort
+    try {
+      await promise
       if (assistantMsg.status === 'generating') {
         assistantMsg.status = 'completed'
         assistantMsg.citations_count = assistantMsg.citations.length
@@ -214,47 +262,66 @@ function onCommand(command) {
     router.push('/login')
   } else if (command === 'profile') {
     router.push('/profile')
-  } else if (command === 'admin') {
-    router.push('/admin')
+  } else if (command === 'space') {
+    router.push('/space/library')
+  } else if (command === 'models') {
+    router.push('/space/models')
   }
 }
 
 function scrollToBottom(smooth = true) {
-  requestAnimationFrame(() => {
+  if (scrollFrame) return
+  scrollFrame = requestAnimationFrame(() => {
+    scrollFrame = 0
     messageListRef.value?.scrollToBottom(smooth)
   })
 }
+
+function stopCurrentStream() {
+  const message = messages.value.at(-1)
+  if (message?._stop) message._stop()
+  else currentStreamAbort?.()
+}
+
+onBeforeUnmount(() => { currentStreamAbort?.(); if (scrollFrame) cancelAnimationFrame(scrollFrame); loadSeq++ })
 </script>
 
 <style scoped>
 .chat-layout {
   display: flex;
-  height: 100%;
-  background: #f5f7fa;
+  height: 100dvh;
+  background: var(--canvas);
+  overflow: hidden;
 }
 .chat-main {
   flex: 1;
   display: flex;
   flex-direction: column;
   min-width: 0;
+  min-height: 0;
 }
 .chat-header {
-  height: 56px;
-  background: #fff;
-  border-bottom: 1px solid #e4e7ed;
+  min-height: 76px;
+  flex-shrink: 0;
+  border-bottom: 1px solid var(--line);
   display: flex;
   align-items: center;
   justify-content: space-between;
-  padding: 0 20px;
+  padding: 0 32px;
 }
-.header-left { display: flex; align-items: center; }
+.header-left { display: flex; align-items: center; gap: 14px; min-width: 0; }.header-left h1 { font-size: 13px; font-weight: 550; overflow: hidden; white-space: nowrap; text-overflow: ellipsis; }.workspace-label { color: var(--muted); font-size: 12px; white-space: nowrap; }.header-slash { color: #bbc6b7; }.header-right { display: flex; align-items: center; gap: 22px; flex-shrink: 0; }.scope-pill { display: flex; align-items: center; gap: 7px; color: var(--muted); font-size: 11px; }.scope-pill>span { width: 5px; height: 5px; border-radius: 50%; background: #5e8a55; }
 .user-chip {
   display: flex;
   align-items: center;
   gap: 8px;
   cursor: pointer;
-  color: #303133;
-  font-size: 14px;
-  outline: none;
+  color: var(--ink);
+  font-size: 12px;
+  background: transparent;
+  border: 0;
+  padding: 6px;
+  border-radius: 8px;
 }
+.user-chip:hover { background: #e9ede4; }.user-chip .el-avatar { background: #e2e9d9; color: #46653d; font-size: 12px; }.mobile-menu { display: none; }
+@media (max-width: 800px) { .chat-header { min-height: 62px; padding: 0 15px; }.mobile-menu { display: flex; }.workspace-label,.header-slash,.scope-pill,.user-name { display: none; }.header-right { gap: 0; }.header-left { gap: 10px; } }
 </style>

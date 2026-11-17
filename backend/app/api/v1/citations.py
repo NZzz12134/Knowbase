@@ -7,7 +7,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.deps import get_current_user, get_db
 from app.core.exceptions import BusinessError
-from app.models import ChatSession, Chunk, Citation, Document, Message, User
+from app.models import ChatSession, Chunk, Citation, Document, KnowledgeBase, Message, User
 
 router = APIRouter(tags=["citations"])
 
@@ -26,7 +26,7 @@ async def list_citations(
             .where(Message.id == message_id)
         )
     ).first()
-    if row is None or row[1].user_id != user.id:
+    if row is None or row[1].user_id != user.id or row[1].is_deleted:
         raise BusinessError("message_not_found", "消息不存在", 404)
 
     rows = (
@@ -34,7 +34,9 @@ async def list_citations(
             select(Citation, Chunk, Document)
             .join(Chunk, Chunk.id == Citation.chunk_id)
             .join(Document, Document.id == Chunk.document_id)
-            .where(Citation.message_id == message_id)
+            .join(KnowledgeBase, KnowledgeBase.id == Document.kb_id)
+            .where(Citation.message_id == message_id, KnowledgeBase.created_by == user.id,
+                   Document.deleted_at.is_(None), KnowledgeBase.is_active.is_(True))
             .order_by(Citation.rank)
         )
     ).all()
@@ -44,10 +46,11 @@ async def list_citations(
             "rank": cit.rank,
             "score": cit.score,
             "chunk_id": str(chunk.id),
+            "document_id": str(doc.id),
             "text": chunk.content,
             "filename": doc.filename,
             "file_type": doc.file_type,
-            "source": doc.source_url or doc.file_path,
+            "source": doc.source_url,
             "page": chunk.page_number,
             "row_start": chunk.row_start,
             "row_end": chunk.row_end,

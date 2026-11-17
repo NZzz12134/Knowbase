@@ -4,5 +4,6 @@ from pydantic import BaseModel, Field
 
 
 class ChatIn(BaseModel):
+    retry_message_id: uuid.UUID | None = None
     session_id: uuid.UUID
     question: str = Field(min_length=1, max_length=4000)

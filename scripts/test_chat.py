@@ -1,5 +1,7 @@
 """SSE 问答链路测试：登录 → 建会话 → 流式提问 → 打印事件流。"""
 import json
+import getpass
+import os
 import sys
 import urllib.request
 
@@ -23,7 +25,10 @@ def req(method, path, token=None, body=None):
 def main():
     question = sys.argv[1] if len(sys.argv) > 1 else "蓝牙耳机 X1 的续航和价格是多少？"
 
-    status, resp = req("POST", "/auth/login", body={"username": "admin", "password": "123456"})
+    username = os.environ.get("KNOWBASE_USERNAME") or input("知库账号：")
+    password = os.environ.get("KNOWBASE_PASSWORD") or getpass.getpass("密码：")
+    status, resp = req("POST", "/auth/login", body={"username": username, "password": password})
+    assert status == 200, f"login failed: {resp}"
     token = resp["access_token"]
     print(f"[1] login OK")
 

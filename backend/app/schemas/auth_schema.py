@@ -31,7 +31,6 @@ class UserOut(BaseModel):
     id: uuid.UUID
     username: str
     email: str | None = None
-    role: str
     created_at: datetime
 
     model_config = {"from_attributes": True}

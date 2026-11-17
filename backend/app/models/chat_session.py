@@ -8,7 +8,7 @@ from app.db.base import Base, TimestampMixin, UUIDPkMixin
 
 
 class ChatSession(Base, UUIDPkMixin, TimestampMixin):
-    """对话会话。kb_id 为 NULL 时检索全部知识库；删除为软删。"""
+    """对话会话。kb_id 为 NULL 时检索当前用户的全部启用知识库；删除为软删。"""
 
     __tablename__ = "chat_sessions"
     __table_args__ = (

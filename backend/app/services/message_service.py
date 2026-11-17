@@ -1,22 +1,24 @@
 """消息服务：历史获取、占位创建、流式追加/完结、引用落库、标题生成。"""
 import logging
 import uuid
+from datetime import timedelta
 
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.db.base import utcnow
 from app.models import Citation, ChatSession, Message
+from app.services.message_order import message_order
 
 logger = logging.getLogger(__name__)
 
 
-async def get_recent_history(db: AsyncSession, session_id: uuid.UUID, limit: int = 6) -> list[dict]:
+async def get_recent_history(db: AsyncSession, session_id: uuid.UUID, limit: int = 6, exclude_ids=()) -> list[dict]:
     rows = (
         await db.execute(
             select(Message)
-            .where(Message.session_id == session_id, Message.status.in_(("completed", "stopped")))
-            .order_by(Message.created_at.desc())
+            .where(Message.session_id == session_id, Message.status.in_(("completed", "stopped")), Message.id.not_in(exclude_ids))
+            .order_by(*message_order(descending=True))
             .limit(limit)
         )
     ).scalars().all()
@@ -28,14 +30,25 @@ async def get_recent_history(db: AsyncSession, session_id: uuid.UUID, limit: int
 
 
 async def create_user_message(db: AsyncSession, session_id: uuid.UUID, content: str) -> Message:
-    msg = Message(session_id=session_id, role="user", content=content, status="completed")
-    db.add(msg)
-    await db.flush()
-    return msg
+    return await _create_message(db, session_id, "user", content, "completed")
 
 
 async def create_assistant_placeholder(db: AsyncSession, session_id: uuid.UUID) -> Message:
-    msg = Message(session_id=session_id, role="assistant", content="", status="generating")
+    return await _create_message(db, session_id, "assistant", "", "generating")
+
+
+async def _create_message(db: AsyncSession, session_id: uuid.UUID, role: str, content: str, status: str) -> Message:
+    # 同一事务内写入提问和回复占位；会话行锁使并发写入也使用递增时间。
+    # Windows 时钟可能多次返回同一微秒，单用 utcnow() 不能保证顺序。
+    await db.execute(select(ChatSession.id).where(ChatSession.id == session_id).with_for_update())
+    latest = await db.scalar(
+        select(Message.created_at).where(Message.session_id == session_id)
+        .order_by(Message.created_at.desc()).limit(1).with_for_update()
+    )
+    created_at = utcnow()
+    if latest is not None:
+        created_at = max(created_at, latest + timedelta(microseconds=1))
+    msg = Message(session_id=session_id, role=role, content=content, status=status, created_at=created_at)
     db.add(msg)
     await db.flush()
     return msg

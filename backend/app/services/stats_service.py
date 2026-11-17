@@ -1,4 +1,4 @@
-"""管理端统计：概览、近 30 天问答趋势、文档状态分布。"""
+"""个人统计：所有计数和趋势始终限定当前账号的有效资料与会话。"""
 import uuid
 from datetime import timedelta
 
@@ -13,11 +13,18 @@ from app.models import (
     Feedback,
     KnowledgeBase,
     Message,
-    User,
 )
 
 
-async def overview(db: AsyncSession) -> dict:
+def _scope(user_id):
+    kbs = select(KnowledgeBase.id).where(KnowledgeBase.created_by == user_id)
+    docs = select(Document.id).where(Document.kb_id.in_(kbs), Document.deleted_at.is_(None))
+    sessions = select(ChatSession.id).where(ChatSession.user_id == user_id, ChatSession.is_deleted.is_(False))
+    messages = select(Message.id).where(Message.session_id.in_(sessions))
+    return kbs, docs, sessions, messages
+
+
+async def overview(db: AsyncSession, user_id) -> dict:
     async def count(model, *conds) -> int:
         stmt = select(func.count()).select_from(model)
         for c in conds:
@@ -26,20 +33,19 @@ async def overview(db: AsyncSession) -> dict:
 
     today_start = utcnow().replace(hour=0, minute=0, second=0, microsecond=0)
 
-    user_count = await count(User)
-    admin_count = await count(User, User.role == "admin")
-    session_count = await count(ChatSession, ChatSession.is_deleted.is_(False))
-    message_count = await count(Message)
-    assistant_count = await count(Message, Message.role == "assistant")
-    document_count = await count(Document, Document.deleted_at.is_(None))
-    chunk_count = await count(Chunk)
-    kb_count = await count(KnowledgeBase)
-    today_qa = await count(Message, Message.role == "user", Message.created_at >= today_start)
+    kbs, docs, sessions, messages = _scope(user_id)
+    session_count = await count(ChatSession, ChatSession.id.in_(sessions))
+    message_count = await count(Message, Message.id.in_(messages))
+    assistant_count = await count(Message, Message.id.in_(messages), Message.role == "assistant")
+    document_count = await count(Document, Document.id.in_(docs))
+    chunk_count = await count(Chunk, Chunk.document_id.in_(docs))
+    kb_count = await count(KnowledgeBase, KnowledgeBase.id.in_(kbs))
+    today_qa = await count(Message, Message.id.in_(messages), Message.role == "user", Message.created_at >= today_start)
 
     doc_status = (
         await db.execute(
             select(Document.parse_status, func.count())
-            .where(Document.deleted_at.is_(None))
+            .where(Document.id.in_(docs))
             .group_by(Document.parse_status)
         )
     ).all()
@@ -48,12 +54,10 @@ async def overview(db: AsyncSession) -> dict:
     failed = doc_status_map.get("failed", 0)
     parse_success_rate = round(succeeded / (succeeded + failed) * 100, 1) if (succeeded + failed) else 100.0
 
-    like_count = await count(Feedback, Feedback.rating == "like")
-    dislike_count = await count(Feedback, Feedback.rating == "dislike")
+    like_count = await count(Feedback, Feedback.message_id.in_(messages), Feedback.user_id == user_id, Feedback.rating == "like")
+    dislike_count = await count(Feedback, Feedback.message_id.in_(messages), Feedback.user_id == user_id, Feedback.rating == "dislike")
 
     return {
-        "user_count": user_count,
-        "admin_count": admin_count,
         "session_count": session_count,
         "message_count": message_count,
         "assistant_answer_count": assistant_count,
@@ -67,8 +71,9 @@ async def overview(db: AsyncSession) -> dict:
     }
 
 
-async def daily_qa(db: AsyncSession, days: int = 30) -> list[dict]:
+async def daily_qa(db: AsyncSession, user_id, days: int = 30) -> list[dict]:
     start = utcnow().date() - timedelta(days=days - 1)
+    _, _, _, messages = _scope(user_id)
 
     rows = await db.execute(
         select(
@@ -76,7 +81,7 @@ async def daily_qa(db: AsyncSession, days: int = 30) -> list[dict]:
             func.sum(func.if_(Message.role == "user", 1, 0)).label("questions"),
             func.sum(func.if_(Message.role == "assistant", 1, 0)).label("answers"),
         )
-        .where(Message.created_at >= start)
+        .where(Message.created_at >= start, Message.id.in_(messages))
         .group_by("day")
         .order_by("day")
     )
@@ -89,7 +94,7 @@ async def daily_qa(db: AsyncSession, days: int = 30) -> list[dict]:
             func.sum(func.if_(Feedback.rating == "like", 1, 0)).label("likes"),
             func.sum(func.if_(Feedback.rating == "dislike", 1, 0)).label("dislikes"),
         )
-        .where(Feedback.created_at >= start)
+        .where(Feedback.created_at >= start, Feedback.message_id.in_(messages), Feedback.user_id == user_id)
         .group_by("day")
     )
     fb_data = {str(r[0]): {"likes": int(r[1] or 0), "dislikes": int(r[2] or 0)} for r in fb_rows.all()}
@@ -109,7 +114,7 @@ async def daily_qa(db: AsyncSession, days: int = 30) -> list[dict]:
     return result
 
 
-async def document_stats(db: AsyncSession) -> list[dict]:
+async def document_stats(db: AsyncSession, user_id) -> list[dict]:
     rows = await db.execute(
         select(
             KnowledgeBase.id,
@@ -118,7 +123,7 @@ async def document_stats(db: AsyncSession) -> list[dict]:
             func.count().label("cnt"),
         )
         .join(Document, Document.kb_id == KnowledgeBase.id)
-        .where(Document.deleted_at.is_(None))
+        .where(Document.deleted_at.is_(None), KnowledgeBase.created_by == user_id)
         .group_by(KnowledgeBase.id, KnowledgeBase.name, Document.parse_status)
     )
     per_kb: dict[uuid.UUID, dict] = {}

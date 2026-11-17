@@ -13,6 +13,7 @@ class User(Base, UUIDPkMixin, TimestampMixin):
     username: Mapped[str] = mapped_column(String(50), unique=True, nullable=False, index=True)
     email: Mapped[str | None] = mapped_column(String(255), nullable=True)
     hashed_password: Mapped[str] = mapped_column(String(255), nullable=False)
+    # Legacy storage only. Retained for non-destructive upgrades; never used for authorization.
     role: Mapped[str] = mapped_column(
         String(20), nullable=False, default="user", server_default="user"
     )

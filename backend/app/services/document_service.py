@@ -3,7 +3,7 @@ import logging
 import uuid
 
 from fastapi import UploadFile
-from sqlalchemy import func, or_, select
+from sqlalchemy import delete, func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.config import get_settings
@@ -174,11 +174,23 @@ async def retry_document(db: AsyncSession, doc_id: uuid.UUID) -> Document:
 
 
 async def delete_document(db: AsyncSession, doc_id: uuid.UUID) -> None:
-    doc = await _get_doc(db, doc_id)
+    doc = await db.scalar(select(Document).where(Document.id == doc_id, Document.deleted_at.is_(None)).with_for_update().execution_options(populate_existing=True))
+    if doc is None:
+        raise BusinessError("document_not_found", "文档不存在", 404)
+    if doc.parse_status == "parsing":
+        raise BusinessError("document_busy", "文档正在解析，请等待完成后删除", 409)
+    try:
+        vector_store.delete_by_document(doc.kb_id, doc.id, strict=True)
+    except Exception as exc:
+        await db.rollback()
+        raise BusinessError("index_unavailable", "索引服务不可用，未完成删除，请稍后重试", 503) from exc
     doc.deleted_at = utcnow()  # 软删除
+    await db.execute(delete(Chunk).where(Chunk.document_id == doc.id))
     await db.commit()
-    vector_store.delete_by_document(doc.kb_id, doc.id)
     await _bump_kb_version(doc.kb_id)
+    if doc.file_type != "url":
+        from app.utils.file_utils import resolve_storage_path
+        resolve_storage_path(doc.file_path).unlink(missing_ok=True)
     logger.info("Document %s deleted (soft)", doc_id)
 
 
@@ -196,8 +208,10 @@ async def list_documents(
     keyword: str | None,
     page: int,
     page_size: int,
+    user_id=None,
 ) -> dict:
     conds = [Document.deleted_at.is_(None)]
+    conds.append(Document.kb_id.in_(select(KnowledgeBase.id).where(KnowledgeBase.created_by == user_id)))
     if kb_id is not None:
         conds.append(Document.kb_id == kb_id)
     if status:

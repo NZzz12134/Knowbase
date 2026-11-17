@@ -4,27 +4,30 @@
 
     <div v-else class="assistant-block">
       <div class="bubble assistant-bubble">
+        <p v-if="message.answer_mode" class="answer-source">{{ message.answer_mode === 'knowledge' ? '结合知识库回答' : '模型直接回答' }}</p>
         <CitationCard
           v-if="message.citations?.length"
           :citations="message.citations"
           style="margin-bottom: 10px"
         />
         <!-- 历史消息的引用：按需拉取详情 -->
-        <div
+        <button
           v-if="!message.citations?.length && (message.citations_count || 0) > 0"
           class="citation-hint"
+          type="button"
           @click="loadHistoryCitations"
         >
           <el-icon><Document /></el-icon>
           引用 {{ message.citations_count }} 个知识库片段
           <el-icon v-if="historyLoading" class="is-loading"><Loading /></el-icon>
-        </div>
+        </button>
         <!-- 生成中状态提示：检索中 → 生成中 → 流式输出 -->
         <div v-if="message.status === 'generating' && !message.content" class="thinking-tip">
           <el-icon class="is-loading"><Loading /></el-icon>
           <template v-if="message.citations?.length">
             已找到 {{ message.citations.length }} 个相关片段，正在生成回答…
           </template>
+          <template v-else-if="message.answer_mode === 'general'">正在生成回答…</template>
           <template v-else>
             正在检索知识库…
           </template>
@@ -44,11 +47,15 @@
         </div>
       </div>
 
-      <div v-if="message.id && message.status === 'completed'" class="actions">
+      <div v-if="message.status !== 'generating'" class="actions">
+        <el-button v-if="canRetry" link type="primary" @click="$emit('retry')">{{ message.status === 'failed' ? '重试回答' : '重新生成' }}</el-button>
+        <button v-if="message.content" class="copy-action" :aria-label="copied ? '已复制回答' : '复制回答'" @click="copyAnswer"><el-icon aria-hidden="true"><Check v-if="copied" /><CopyDocument v-else /></el-icon><span>{{ copied ? '已复制' : '复制' }}</span></button>
+        <template v-if="message.id && message.status === 'completed'">
         <el-button
           link
           size="small"
           :type="message.feedback === 'like' ? 'primary' : 'info'"
+          :aria-pressed="message.feedback === 'like'"
           @click="$emit('feedback', 'like')"
         >
           <el-icon><CaretTop /></el-icon> 有帮助
@@ -57,10 +64,12 @@
           link
           size="small"
           :type="message.feedback === 'dislike' ? 'danger' : 'info'"
+          :aria-pressed="message.feedback === 'dislike'"
           @click="$emit('feedback', 'dislike')"
         >
           <el-icon><CaretBottom /></el-icon> 无帮助
         </el-button>
+        </template>
         <el-button v-if="message._stop && streaming" link size="small" type="danger" @click="message._stop()">
           停止生成
         </el-button>
@@ -78,30 +87,43 @@
               <template v-if="c.heading_path"> · {{ c.heading_path }}</template>
             </div>
             <div class="cite-text">{{ c.text }}</div>
+            <el-button v-if="c.document_id" link type="primary" @click="originalPreview.open(c)">查看原文{{ c.page ? ` · 第 ${c.page} 页` : '' }}</el-button>
           </div>
           <el-empty v-if="!historyLoading && !historyCitations.length" description="暂无引用" />
         </div>
       </el-dialog>
+      <DocumentPreview ref="originalPreview" />
     </div>
   </div>
 </template>
 
 <script setup>
-import { ref } from 'vue'
-import { CaretBottom, CaretTop, Document, Loading, WarningFilled } from '@element-plus/icons-vue'
+import { onBeforeUnmount, ref } from 'vue'
+import { ElMessage } from 'element-plus'
+import { CaretBottom, CaretTop, Check, CopyDocument, Document, Loading, WarningFilled } from '@element-plus/icons-vue'
 import { chatApi } from '../../api/chat'
 import { renderMarkdown } from '../../utils/markdown'
 import CitationCard from './CitationCard.vue'
+import DocumentPreview from '../DocumentPreview.vue'
+const originalPreview = ref(null)
 
 const props = defineProps({
   message: { type: Object, required: true },
   streaming: { type: Boolean, default: false },
+  canRetry: Boolean,
 })
-defineEmits(['feedback'])
+defineEmits(['feedback', 'retry'])
 
 const historyDialogVisible = ref(false)
 const historyLoading = ref(false)
 const historyCitations = ref([])
+const copied = ref(false)
+let copyTimer
+async function copyAnswer() {
+  try { await navigator.clipboard.writeText(props.message.content); copied.value = true; clearTimeout(copyTimer); copyTimer = setTimeout(() => { copied.value = false }, 1800) }
+  catch { ElMessage.warning('复制未完成，请选中文字后复制。') }
+}
+onBeforeUnmount(() => clearTimeout(copyTimer))
 
 async function loadHistoryCitations() {
   if (!props.message.id) return
@@ -119,33 +141,36 @@ async function loadHistoryCitations() {
 </script>
 
 <style scoped>
-.message-item { max-width: 76%; }
+.message-item { width: 100%; min-width: 0; }.user .message-item { max-width: 85%; width: auto; }
 .bubble {
-  padding: 12px 16px;
-  border-radius: 10px;
-  font-size: 14px;
+  padding: 17px 21px;
+  border-radius: 14px;
+  font-size: 13px;
   line-height: 1.7;
 }
 .user-bubble {
-  background: #409eff;
-  color: #fff;
+  background: #e8eede;
+  color: #2b4331;
+  border-radius: 14px 3px 14px 14px;
   white-space: pre-wrap;
   word-break: break-word;
 }
 .assistant-block { width: 100%; }
+.answer-source { font-size: 11px; color: var(--muted); margin-bottom: 10px; }
 .assistant-bubble {
   background: #fff;
-  color: #303133;
-  border: 1px solid #e4e7ed;
+  color: var(--ink);
+  border: 1px solid #e3e9dc;
   word-break: break-word;
-  min-width: 200px; /* 生成中空内容时气泡不至于过小 */
+  min-width: 0;
+  border-radius: 3px 14px 14px 14px;
 }
 .thinking-tip {
   display: flex;
   align-items: center;
   gap: 8px;
-  color: #909399;
-  font-size: 14px;
+  color: var(--muted);
+  font-size: 12px;
   padding: 4px 0;
 }
 .citation-hint {
@@ -153,17 +178,18 @@ async function loadHistoryCitations() {
   align-items: center;
   gap: 4px;
   font-size: 13px;
-  color: #409eff;
   cursor: pointer;
-  background: #ecf5ff;
+  background: #edf3e7;
+  border: 1px solid #dbe5d1;
+  color: var(--accent);
   border-radius: 6px;
-  padding: 4px 10px;
+  padding: 7px 10px;
   margin-bottom: 10px;
 }
-.citation-hint:hover { background: #d9ecff; }
-.actions { margin-top: 6px; padding-left: 4px; }
+.citation-hint:hover { background: #e0e9d6; }
+.actions { margin-top: 7px; padding-left: 4px; display: flex; align-items: center; gap: 5px; }.actions :deep(.el-button) { font-size: 10px; padding: 3px 6px; }.copy-action { background: transparent; border: 0; display: inline-flex; gap: 5px; align-items: center; color: var(--muted); font-size: 10px; border-radius: 5px; padding: 8px 6px; }.copy-action:hover { color: var(--accent); background: #e9eee2; }
 .error-tip {
-  color: #f56c6c;
+  color: var(--el-color-danger);
   font-size: 13px;
   display: flex;
   align-items: center;
@@ -177,7 +203,7 @@ async function loadHistoryCitations() {
   width: 18px;
   height: 18px;
   min-width: 18px;
-  background: #409eff;
+  background: var(--accent);
   color: #fff;
   border-radius: 50%;
   font-size: 11px;

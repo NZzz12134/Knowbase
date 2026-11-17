@@ -8,6 +8,7 @@ from app.core.deps import get_session_or_404
 from app.core.exceptions import BusinessError
 from app.db.base import utcnow
 from app.models import ChatSession, KnowledgeBase, Message
+from app.services.message_order import message_order
 
 
 async def list_sessions(
@@ -31,30 +32,26 @@ async def list_sessions(
 
     sessions: list[ChatSession] = list(rows)
 
-    # 批量取最后一条消息预览（避免 N+1）：created_at 为微秒精度，max 即最后一条
+    # 与历史列表使用相同顺序；不能用 max(created_at) 连接，旧消息可能时间相同。
     previews: dict[uuid.UUID, str] = {}
     if sessions:
         ids = [s.id for s in sessions]
         subq = (
-            select(Message.session_id, func.max(Message.created_at).label("max_ts"))
+            select(
+                Message.session_id,
+                Message.content,
+                func.row_number().over(
+                    partition_by=Message.session_id,
+                    order_by=message_order(descending=True),
+                ).label("position"),
+            )
             .where(Message.session_id.in_(ids))
-            .group_by(Message.session_id)
             .subquery()
         )
-        last_msgs = (
-            (
-                await db.execute(
-                    select(Message).join(
-                        subq,
-                        Message.created_at == subq.c.max_ts,
-                    )
-                )
-            )
-            .scalars()
-            .all()
+        last_msgs = await db.execute(
+            select(subq.c.session_id, subq.c.content).where(subq.c.position == 1)
         )
-        for m in last_msgs:
-            previews[m.session_id] = m.content[:80]
+        previews = {session_id: content[:80] for session_id, content in last_msgs}
 
     # kb 名称映射
     kb_ids = [s.kb_id for s in sessions if s.kb_id]
@@ -91,7 +88,7 @@ async def create_session(
 ) -> ChatSession:
     if kb_id is not None:
         kb = await db.get(KnowledgeBase, kb_id)
-        if kb is None or not kb.is_active:
+        if kb is None or not kb.is_active or kb.created_by != user_id:
             raise BusinessError("kb_not_found", "知识库不存在", 404)
     session = ChatSession(
         user_id=user_id, kb_id=kb_id, title=(title or "新会话")[:200]
@@ -126,7 +123,7 @@ async def list_messages(
     rows = (
         (
             await db.execute(
-                base.order_by(Message.created_at.asc())
+                base.order_by(*message_order())
                 .offset((page - 1) * page_size)
                 .limit(page_size)
             )
@@ -169,6 +166,7 @@ async def list_messages(
                 "created_at": m.created_at,
                 "feedback": feedback_map.get(m.id),
                 "citations_count": citations_map.get(m.id, 0),
+                "answer_mode": (m.token_usage or {}).get("answer_mode"),
             }
             for m in messages
         ],

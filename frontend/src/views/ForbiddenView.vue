@@ -1,11 +1,11 @@
 <template>
-  <div class="forbidden">
-    <el-result icon="warning" title="403 无权访问" sub-title="该页面仅管理员可访问，如需权限请联系管理员">
+  <main id="main-content" tabindex="-1" class="forbidden">
+    <el-result icon="warning" title="无法访问此内容" sub-title="请返回个人空间，查看自己的资料。">
       <template #extra>
-        <el-button type="primary" @click="$router.push('/')">返回聊天</el-button>
+        <RouterLink to="/">返回知识对话 ↗</RouterLink>
       </template>
     </el-result>
-  </div>
+  </main>
 </template>
 
 <script setup>

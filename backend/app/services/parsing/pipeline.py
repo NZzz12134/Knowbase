@@ -9,7 +9,7 @@ import asyncio
 import logging
 import uuid
 
-from sqlalchemy import delete, update
+from sqlalchemy import delete, select, update
 
 from app.db.session import SessionLocal
 from app.models import Chunk, Document
@@ -23,6 +23,33 @@ logger = logging.getLogger(__name__)
 
 
 async def run_parse_pipeline(document_id: str) -> dict:
+    from app.services.model_config_service import load_model_settings, model_settings_scope
+    from app.models import KnowledgeBase
+    async with SessionLocal() as db:
+        doc = await db.get(Document, uuid.UUID(document_id))
+        if doc is None or doc.deleted_at is not None:
+            return {"status": "skipped", "reason": "document not found"}
+        kb = await db.get(KnowledgeBase, doc.kb_id)
+        if kb is None:
+            return {"status": "skipped", "reason": "knowledge base not found"}
+        owner_id = kb.created_by
+    from app.services.personal_access import retrieval_scope
+    from app.core.exceptions import BusinessError
+    try:
+        settings = await load_model_settings(owner_id)
+    except BusinessError as exc:
+        if exc.code != "model_config_required":
+            raise
+        async with SessionLocal() as db:
+            await db.execute(update(Document).where(Document.id == doc.id, Document.deleted_at.is_(None),
+                Document.parse_status.in_(("pending", "failed"))).values(parse_status="failed", error_message=exc.message))
+            await db.commit()
+        return {"status": "failed", "reason": exc.message}
+    with model_settings_scope(settings), retrieval_scope(owner_id, (doc.kb_id,)):
+        return await _run_parse_pipeline(document_id)
+
+
+async def _run_parse_pipeline(document_id: str) -> dict:
     doc_uuid = uuid.UUID(document_id)
     async with SessionLocal() as db:
         doc = await db.get(Document, doc_uuid)
@@ -34,6 +61,7 @@ async def run_parse_pipeline(document_id: str) -> dict:
             update(Document)
             .where(
                 Document.id == doc_uuid,
+                Document.deleted_at.is_(None),
                 Document.parse_status.in_(("pending", "failed")),
             )
             .values(parse_status="parsing", parse_progress=0, error_message=None)
@@ -67,8 +95,8 @@ async def run_parse_pipeline(document_id: str) -> dict:
             doc.parse_progress = 90
             await db.commit()
 
-            # 5. 写入前复检：期间被管理员删除则回滚退出（防复活）
-            await db.refresh(doc)
+            # 5. 写入前复检：期间被删除则回滚退出（防复活）
+            await db.execute(select(Document).where(Document.id == doc_uuid).with_for_update().execution_options(populate_existing=True))
             if doc.deleted_at is not None:
                 logger.info("document %s deleted during parse, aborting", document_id)
                 return {"status": "skipped", "reason": "deleted during parse"}
@@ -150,14 +178,14 @@ def _is_retryable(exc: Exception) -> bool:
 
 
 def _friendly_error(exc: Exception) -> str:
-    """把底层异常映射为面向管理员的中文提示（原始信息进日志）。"""
+    """把底层异常映射为面向用户的中文提示（原始信息进日志）。"""
     if isinstance(exc, ValueError):
         return str(exc)[:2000]  # loader 已抛出中文说明
     import httpx
 
     if isinstance(exc, httpx.HTTPStatusError):
         if exc.response.status_code == 401:
-            return "API Key 无效或无权限，请检查 .env 中的密钥配置"
+            return "API Key 无效或无权限，请检查「我的模型」配置"
         if exc.response.status_code == 429:
             return "模型 API 限流，请稍后点击「重试」"
         if exc.response.status_code >= 500:

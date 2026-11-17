@@ -7,14 +7,17 @@ DashScope 等国内兼容端点不支持 —— 这里用 httpx 直调，请求�
 import hashlib
 import json
 import logging
+import math
 import zlib
-from functools import lru_cache
 
 import httpx
 from langchain_core.embeddings import Embeddings
-from tenacity import retry, stop_after_attempt, wait_exponential
+from tenacity import retry, retry_if_exception, stop_after_attempt, wait_exponential
 
 from app.core.config import get_settings
+from app.services.model_config_service import get_model_settings
+from app.services.providers.ollama import ollama_root
+from app.services.providers.rerank import _retryable
 
 logger = logging.getLogger(__name__)
 
@@ -25,22 +28,32 @@ EMBED_BATCH_SLEEP = 0.3  # 批间 sleep 防国内 API 限速
 class OpenAICompatEmbeddings(Embeddings):
     """OpenAI 兼容 embedding 端点（DashScope / DeepSeek / SiliconFlow / 智谱）。"""
 
-    def __init__(self, model: str, api_key: str, base_url: str, timeout: float = 60.0):
+    def __init__(self, model: str, api_key: str, base_url: str, timeout: float = 60.0, mode: str = "api"):
         self.model = model
         self.api_key = api_key
         self.base_url = base_url.rstrip("/")
-        self._client = httpx.AsyncClient(timeout=timeout)
+        self.timeout = timeout
+        self.mode = mode
 
     async def _call(self, texts: list[str]) -> list[list[float]]:
-        resp = await self._client.post(
-            f"{self.base_url}/embeddings",
-            json={"model": self.model, "input": texts},
-            headers={"Authorization": f"Bearer {self.api_key}"},
-        )
+        url = ollama_root(self.base_url) + "/api/embed" if self.mode == "ollama" else f"{self.base_url}/embeddings"
+        async with httpx.AsyncClient(timeout=self.timeout) as client:
+            resp = await client.post(
+                url, json={"model": self.model, "input": texts},
+                headers={"Authorization": f"Bearer {self.api_key}"} if self.api_key else {},
+            )
         resp.raise_for_status()
-        data = resp.json().get("data", [])
-        data.sort(key=lambda x: x.get("index", 0))
-        return [d["embedding"] for d in data]
+        if self.mode == "ollama":
+            vectors = resp.json().get("embeddings", [])
+        else:
+            data = resp.json().get("data", [])
+            data.sort(key=lambda x: x.get("index", 0))
+            vectors = [d["embedding"] for d in data]
+        if len(vectors) != len(texts) or any(not isinstance(v, list) or not v for v in vectors):
+            raise ValueError("Embedding 服务返回的向量数量或内容无效")
+        if vectors and (any(len(v) != len(vectors[0]) for v in vectors) or any(type(n) not in (float, int) or not math.isfinite(n) for v in vectors for n in v)):
+            raise ValueError("Embedding 服务返回的向量维度或数值无效")
+        return vectors
 
     async def aembed_documents(self, texts: list[str]) -> list[list[float]]:
         return await self._call(texts)
@@ -64,23 +77,28 @@ class OpenAICompatEmbeddings(Embeddings):
         return self.embed_documents([text])[0]
 
 
-@lru_cache(maxsize=1)
 def get_embeddings() -> OpenAICompatEmbeddings:
-    s = get_settings()
+    s = get_model_settings()
+    if not s.EMBEDDING_MODEL or not s.EMBEDDING_BASE_URL or (s.EMBEDDING_MODE == "api" and not s.EMBEDDING_API_KEY):
+        from app.core.exceptions import BusinessError
+        raise BusinessError("model_config_required", "请先配置自己的 Embedding 模型", 428)
     return OpenAICompatEmbeddings(
         model=s.EMBEDDING_MODEL,
         api_key=s.EMBEDDING_API_KEY,
         base_url=s.EMBEDDING_BASE_URL,
+        mode=s.EMBEDDING_MODE,
     )
 
 
 def _cache_key(text: str) -> str:
-    s = get_settings()
+    s = get_model_settings()
+    endpoint_hash = hashlib.sha256(f"{s.EMBEDDING_MODE}|{s.EMBEDDING_BASE_URL.rstrip('/')}|{s.EMBEDDING_MODEL}".encode()).hexdigest()[:16]
     digest = hashlib.sha256(text.encode("utf-8")).hexdigest()
-    return f"embed:{s.EMBEDDING_PROVIDER}:{s.EMBEDDING_MODEL}:{digest}"
+    from app.services.personal_access import current_scope
+    return f"embed:{current_scope()[0] or 'system'}:{endpoint_hash}:{digest}"
 
 
-@retry(wait=wait_exponential(multiplier=1, max=60), stop=stop_after_attempt(3), reraise=True)
+@retry(wait=wait_exponential(multiplier=1, max=60), stop=stop_after_attempt(3), retry=retry_if_exception(_retryable), reraise=True)
 async def _embed_remote(texts: list[str]) -> list[list[float]]:
     return await get_embeddings().aembed_documents(texts)
 

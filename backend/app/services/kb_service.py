@@ -19,11 +19,7 @@ async def create_kb(
     db.add(kb)
     await db.commit()
     await db.refresh(kb)
-    try:
-        vector_store.ensure_collection(kb.id)  # 同步 IO 极轻量，建 collection 元数据
-    except Exception as exc:
-        # 建 collection 失败不阻断 KB 创建，解析任务时重试
-        logger.error("ensure_collection failed for kb %s: %s", kb.id, exc)
+    # 向量集合在首次解析时，使用该账号的 Embedding 配置创建。
     return kb
 
 
@@ -49,27 +45,42 @@ async def delete_kb(db: AsyncSession, kb_id: uuid.UUID) -> None:
     if kb is None:
         raise BusinessError("kb_not_found", "知识库不存在", 404)
     # 绑定该 KB 的会话解除绑定（外键 ondelete SET NULL 兜底，显式更新避免依赖）
+    from app.services.document_service import delete_document
+    docs = (await db.execute(select(Document).where(Document.kb_id == kb_id, Document.deleted_at.is_(None)))).scalars().all()
+    if any(doc.parse_status == "parsing" for doc in docs):
+        raise BusinessError("document_busy", "知识库中有文档正在解析，请等待完成后删除", 409)
+    for doc in docs:
+        await delete_document(db, doc.id)
+    # Also clean originals that were soft-deleted by older releases.
+    from app.utils.file_utils import resolve_storage_path
+    all_docs = (await db.execute(select(Document).where(Document.kb_id == kb_id))).scalars().all()
+    for doc in all_docs:
+        if doc.file_type != "url":
+            resolve_storage_path(doc.file_path).unlink(missing_ok=True)
+    try:
+        vector_store.delete_collection(kb_id, strict=True)
+    except Exception as exc:
+        raise BusinessError("index_unavailable", "索引清理未完成，请稍后重试删除知识库", 503) from exc
     await db.execute(
         update(ChatSession).where(ChatSession.kb_id == kb_id).values(kb_id=None)
     )
     await db.delete(kb)  # documents/chunks 由 FK ondelete CASCADE 清理
     await db.commit()
-    vector_store.delete_collection(kb_id)
     logger.info("Knowledge base %s deleted", kb_id)
 
 
-async def list_active_kbs(db: AsyncSession) -> list[KnowledgeBase]:
+async def list_active_kbs(db: AsyncSession, user_id=None) -> list[KnowledgeBase]:
     from sqlalchemy import select
 
-    rows = await db.execute(select(KnowledgeBase).where(KnowledgeBase.is_active.is_(True)))
+    rows = await db.execute(select(KnowledgeBase).where(KnowledgeBase.is_active.is_(True), KnowledgeBase.created_by == user_id))
     return list(rows.scalars().all())
 
 
-async def list_kbs_admin(db: AsyncSession) -> list[dict]:
+async def list_kbs_admin(db: AsyncSession, user_id=None) -> list[dict]:
     """管理端列表：附带文档/分块数量与解析状态统计。"""
     from sqlalchemy import select
 
-    kbs = list((await db.execute(select(KnowledgeBase))).scalars().all())
+    kbs = list((await db.execute(select(KnowledgeBase).where(KnowledgeBase.created_by == user_id))).scalars().all())
     kb_ids = [k.id for k in kbs]
 
     doc_stats: dict[uuid.UUID, dict] = {}

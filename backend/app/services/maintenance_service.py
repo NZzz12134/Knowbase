@@ -6,7 +6,7 @@ from sqlalchemy import update
 
 from app.db.base import utcnow
 from app.db.session import SessionLocal
-from app.models import Document
+from app.models import Document, Message
 
 logger = logging.getLogger(__name__)
 
@@ -48,6 +48,10 @@ async def sweep_stale_documents() -> dict:
                 error_message="任务未能入队（队列服务异常），请点击「重试」",
             )
         )
+        # A crashed server cannot finish its old SSE placeholders. Make them retryable.
+        await db.execute(update(Message).where(
+            Message.status == "generating", Message.created_at < now - timedelta(minutes=15)
+        ).values(status="failed", error_message="上次生成因服务中断未完成，请点击重试回答"))
         await db.commit()
 
     swept = (r1.rowcount or 0) + (r2.rowcount or 0)

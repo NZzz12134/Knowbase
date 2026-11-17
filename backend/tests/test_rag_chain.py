@@ -1,8 +1,19 @@
-"""RAG 链路测试：用 Fake 组件验证编排逻辑（condense、空检索短路、citations 事件）。"""
+"""RAG 链路测试：问题改写、直接回答、引用事件。"""
+import uuid
 import pytest
 
 from app.services.rag import chain as chain_module
 from app.services.rag.retrievers import RetrievedChunk
+from app.services.personal_access import retrieval_scope
+
+
+@pytest.fixture(autouse=True)
+def active_scope(monkeypatch):
+    async def relevant(question, chunks):
+        return chunks
+    monkeypatch.setattr(chain_module, 'select_relevant_chunks', relevant)
+    with retrieval_scope(uuid.UUID(int=1), (uuid.UUID(int=2),)):
+        yield
 
 
 @pytest.fixture
@@ -23,8 +34,14 @@ def fake_chunks():
     ]
 
 
-async def test_empty_retrieval_short_circuit(monkeypatch):
-    """检索为空 → 不调 LLM，直接返回固定文案。"""
+async def test_empty_retrieval_direct_answer(monkeypatch):
+    """检索为空 → 对话模型直接回答，不附知识库引用。"""
+    from langchain_core.language_models.fake_chat_models import FakeListChatModel
+    monkeypatch.setattr(chain_module, 'get_llm', lambda: FakeListChatModel(responses=['你好，可以直接聊聊。']))
+    async def no_cache(*args):
+        return None
+    monkeypatch.setattr(chain_module.cache, 'get_cached_answer', no_cache)
+    monkeypatch.setattr(chain_module.cache, 'set_cached_answer', no_cache)
     async def fake_embed(texts):
         return [[0.1] * 8 for _ in texts]
 
@@ -38,7 +55,8 @@ async def test_empty_retrieval_short_circuit(monkeypatch):
     async for event, payload in chain_module.run_qa_stream(None, "问题", []):
         events.append((event, payload))
 
-    assert events == [("token", {"content": "知识库中未找到相关内容"})]
+    assert events[0] == ('citations', {'citations': [], 'answer_mode': 'general', 'mode': 'general'})
+    assert ''.join(p['content'] for e, p in events if e == 'token') == '你好，可以直接聊聊。'
 
 
 async def test_citations_event_emitted(monkeypatch, fake_chunks):
@@ -68,6 +86,7 @@ async def test_citations_event_emitted(monkeypatch, fake_chunks):
 
     kinds = [e for e, _ in events]
     assert kinds[0] == "citations"
+    assert events[0][1]['answer_mode'] == 'knowledge'
     assert kinds[-1] == "usage"
     citations = events[0][1]["citations"]
     assert len(citations) == 2

@@ -1,14 +1,15 @@
 <template>
-  <div>
+  <div class="admin-page">
     <div class="page-header">
-      <h3>知识库列表</h3>
+      <div><span class="eyebrow">KNOWLEDGE LIBRARY</span><h1>管理你的知识<span class="page-count">{{ kbs.length }} 个知识库</span></h1><p>给文档一个有序的家，让每次提问都能找到可靠的答案。</p></div>
       <el-button type="primary" @click="openCreate">
         <el-icon><Plus /></el-icon>&nbsp;新建知识库
       </el-button>
     </div>
 
-    <el-table :data="kbs" v-loading="loading" border stripe>
-      <el-table-column prop="name" label="名称" min-width="150" />
+    <div class="overview-strip"><div class="overview-cell"><span>知识库总数</span><strong>{{ kbs.length }}</strong></div><div class="overview-cell"><span>已收录文档</span><strong>{{ kbs.reduce((sum,k) => sum + (k.document_count || 0), 0) }}</strong></div><div class="overview-cell"><span>可检索知识分块</span><strong>{{ new Intl.NumberFormat('zh-CN').format(kbs.reduce((sum,k) => sum + (k.chunk_count || 0), 0)) }}</strong></div></div>
+    <el-table :data="kbs" v-loading="loading" empty-text="还没有知识库，点击「新建知识库」开始整理知识。">
+      <el-table-column prop="name" label="知识库" min-width="190"><template #default="{ row }"><div class="table-name"><span class="file-symbol"><el-icon aria-hidden="true"><FolderOpened /></el-icon></span><strong>{{ row.name }}</strong></div></template></el-table-column>
       <el-table-column prop="description" label="描述" min-width="220" show-overflow-tooltip />
       <el-table-column label="文档数" width="100" align="center">
         <template #default="{ row }">{{ row.document_count ?? 0 }}</template>
@@ -39,8 +40,9 @@
           </el-tag>
         </template>
       </el-table-column>
-      <el-table-column label="操作" width="180" align="center">
+      <el-table-column label="操作" width="270" align="center">
         <template #default="{ row }">
+          <el-button link type="primary" @click="openDocuments(row)">管理文档</el-button>
           <el-button link type="primary" @click="openEdit(row)">编辑</el-button>
           <el-button link :type="row.is_active ? 'warning' : 'success'" @click="toggleActive(row)">
             {{ row.is_active ? '停用' : '启用' }}
@@ -53,10 +55,10 @@
     <el-dialog v-model="dialogVisible" :title="editing ? '编辑知识库' : '新建知识库'" width="480px">
       <el-form :model="form" label-width="70px">
         <el-form-item label="名称" required>
-          <el-input v-model="form.name" maxlength="100" placeholder="例如：商品知识库" />
+          <el-input v-model="form.name" name="kb-name" aria-label="知识库名称" autocomplete="off" maxlength="100" placeholder="例如：产品手册、团队制度…" />
         </el-form-item>
         <el-form-item label="描述">
-          <el-input v-model="form.description" type="textarea" :rows="3" placeholder="知识库用途说明（可选）" />
+          <el-input v-model="form.description" name="kb-description" aria-label="知识库描述" autocomplete="off" type="textarea" :rows="3" placeholder="描述知识库的内容和用途（可选）…" />
         </el-form-item>
       </el-form>
       <template #footer>
@@ -70,8 +72,11 @@
 <script setup>
 import { onMounted, reactive, ref } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
-import { Plus } from '@element-plus/icons-vue'
+import { FolderOpened, Plus } from '@element-plus/icons-vue'
 import { kbApi } from '../../api/admin'
+import { useRouter } from 'vue-router'
+const router = useRouter()
+function openDocuments(row) { router.push({ path: '/space/documents', query: { kb: row.id } }) }
 
 const kbs = ref([])
 const loading = ref(false)
@@ -83,7 +88,7 @@ const form = reactive({ name: '', description: '' })
 async function fetchList() {
   loading.value = true
   try {
-    kbs.value = await kbApi.adminList()
+    kbs.value = await kbApi.all()
   } finally {
     loading.value = false
   }

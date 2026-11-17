@@ -52,4 +52,8 @@ def save_upload(content: bytes, file_type: str) -> str:
 
 
 def resolve_storage_path(rel_path: str) -> Path:
-    return get_settings().storage_path / rel_path
+    root = get_settings().storage_path.resolve()
+    path = (root / rel_path).resolve()
+    if not path.is_relative_to(root):
+        raise BusinessError("invalid_path", "无效的文件路径", 400)
+    return path

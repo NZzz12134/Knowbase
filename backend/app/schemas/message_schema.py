@@ -17,6 +17,7 @@ class MessageOut(BaseModel):
     # 当前用户的反馈状态（like/dislike/None）与引用片段数量（详情按需拉 /messages/{id}/citations）
     feedback: str | None = None
     citations_count: int = 0
+    answer_mode: str | None = None
 
 
 class MessageListOut(BaseModel):

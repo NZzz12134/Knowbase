@@ -10,12 +10,10 @@ from functools import lru_cache
 import httpx
 from tenacity import retry, retry_if_exception, stop_after_attempt, wait_exponential
 
-from app.core.config import get_settings
+from app.services.model_config_service import get_model_settings
+from app.services.providers.ollama import ollama_rerank
 
 logger = logging.getLogger(__name__)
-
-DASHSCOPE_RERANK_URL = "https://dashscope.aliyuncs.com/api/v1/services/rerank/text-rerank/text-rerank"
-
 
 @lru_cache(maxsize=1)
 def _client() -> httpx.AsyncClient:
@@ -37,10 +35,18 @@ def _retryable(exc: BaseException) -> bool:
 )
 async def rerank(query: str, documents: list[str], top_n: int | None = None) -> list[tuple[int, float]]:
     """返回 [(原文档索引, 相关度分数)]，按分数降序。"""
-    s = get_settings()
+    s = get_model_settings()
     if not s.RERANK_ENABLED:
         raise RuntimeError("rerank disabled")
+    if not s.RERANK_MODEL or not s.RERANK_BASE_URL or (s.RERANK_MODE == "api" and not s.RERANK_API_KEY):
+        from app.core.exceptions import BusinessError
+        raise BusinessError("model_config_required", "请先配置自己的 Rerank 模型，或关闭重排", 428)
     top_n = top_n or min(len(documents), s.RERANK_TOP_N)
+    if not documents:
+        return []
+    if s.RERANK_MODE == "ollama":
+        async with httpx.AsyncClient(timeout=120) as client:
+            return await ollama_rerank(client, s.RERANK_BASE_URL, s.RERANK_MODEL, s.RERANK_API_KEY, query, documents, top_n)
     headers = {"Authorization": f"Bearer {s.RERANK_API_KEY}"}
 
     if s.RERANK_PROVIDER == "dashscope":
@@ -49,7 +55,10 @@ async def rerank(query: str, documents: list[str], top_n: int | None = None) -> 
             "input": {"query": query, "documents": documents},
             "parameters": {"top_n": top_n, "return_documents": False},
         }
-        resp = await _client().post(DASHSCOPE_RERANK_URL, json=payload, headers=headers)
+        from urllib.parse import urlsplit
+        p = urlsplit(s.RERANK_BASE_URL)
+        url = f"{p.scheme}://{p.netloc}/api/v1/services/rerank/text-rerank/text-rerank"
+        resp = await _client().post(url, json=payload, headers=headers)
         resp.raise_for_status()
         results = resp.json().get("output", {}).get("results", [])
     else:
@@ -64,4 +73,8 @@ async def rerank(query: str, documents: list[str], top_n: int | None = None) -> 
         resp.raise_for_status()
         results = resp.json().get("results", [])
 
-    return [(r["index"], r.get("relevance_score", 0.0)) for r in results]
+    import math
+    ranked = [(r["index"], float(r["relevance_score"])) for r in results]
+    if not ranked or any(type(i) is not int or not 0 <= i < len(documents) or not math.isfinite(score) for i, score in ranked) or len({i for i, _ in ranked}) != len(ranked):
+        raise ValueError("Rerank 服务返回了无效的索引或评分")
+    return sorted(ranked, key=lambda item: -item[1])[:top_n]

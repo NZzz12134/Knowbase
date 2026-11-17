@@ -1,13 +1,14 @@
 """Chroma 管理：embedded/server 双模式、per-KB collection、HNSW 参数、批量增删。"""
-import hashlib
 import logging
 import uuid
 from functools import lru_cache
 
 from chromadb import HttpClient, PersistentClient
 from chromadb.config import Settings as ChromaSettings
+from chromadb.errors import InvalidCollectionException
 
 from app.core.config import get_settings
+from app.services.model_config_service import embedding_namespace
 
 logger = logging.getLogger(__name__)
 
@@ -35,7 +36,7 @@ def get_chroma_client():
 
 def collection_name(kb_id: uuid.UUID) -> str:
     """collection 名带 embedding 模型 hash：更换模型（维度变化）自动启用新 collection，避免混用。"""
-    model_hash = hashlib.md5(get_settings().EMBEDDING_MODEL.encode()).hexdigest()[:8]
+    model_hash = embedding_namespace()
     return f"kb_{kb_id.hex}_{model_hash}"
 
 
@@ -50,11 +51,15 @@ def get_collection(kb_id: uuid.UUID):
     return get_chroma_client().get_collection(name=collection_name(kb_id))
 
 
-def delete_collection(kb_id: uuid.UUID) -> None:
+def delete_collection(kb_id: uuid.UUID, strict=False) -> None:
     try:
-        get_chroma_client().delete_collection(name=collection_name(kb_id))
+        for col in get_chroma_client().list_collections():
+            if col.name.startswith(f"kb_{kb_id.hex}_"):
+                get_chroma_client().delete_collection(name=col.name)
         logger.info("Deleted chroma collection for kb %s", kb_id)
     except Exception as exc:  # collection 不存在时忽略
+        if strict:
+            raise
         logger.warning("delete_collection %s: %s", kb_id, exc)
 
 
@@ -77,10 +82,14 @@ def add_chunks(
         )
 
 
-def delete_by_document(kb_id: uuid.UUID, document_id: uuid.UUID) -> None:
+def delete_by_document(kb_id: uuid.UUID, document_id: uuid.UUID, strict=False) -> None:
     try:
-        get_collection(kb_id).delete(where={"document_id": str(document_id)})
+        for col in get_chroma_client().list_collections():
+            if col.name.startswith(f"kb_{kb_id.hex}_"):
+                col.delete(where={"document_id": str(document_id)})
     except Exception as exc:
+        if strict:
+            raise
         logger.warning("delete_by_document %s: %s", document_id, exc)
 
 
@@ -95,12 +104,17 @@ def query_collection(
     返回 (ids, documents, metadatas, scores) —— score 由 cosine distance 转换：1 - distance。
     """
     if kb_id is not None:
-        cols = [get_collection(kb_id)]
+        try:
+            cols = [get_collection(kb_id)]
+        except InvalidCollectionException:
+            return [], [], [], []
     else:
         cols = _all_collections()
 
     all_ids, all_docs, all_metas, all_scores = [], [], [], []
     for col in cols:
+        if col.count() == 0:
+            continue
         res = col.query(
             query_embeddings=[query_embedding],
             n_results=n_results,
@@ -119,9 +133,8 @@ def query_collection(
 
 def _all_collections():
     """kb_id=None（会话未绑知识库）：检索全部知识库。collection 名过滤 kb_ 前缀。"""
-    prefix = "kb_"
-    return [
-        col
-        for col in get_chroma_client().list_collections()
-        if col.name.startswith(prefix)
-    ]
+    from app.services.personal_access import current_scope
+    names = {collection_name(kb_id) for kb_id in current_scope()[1]}
+    if not names:
+        return []
+    return [col for col in get_chroma_client().list_collections() if col.name in names]

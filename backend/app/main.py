@@ -1,4 +1,4 @@
-"""FastAPI 应用入口：lifespan 建表/种子、CORS、异常处理、路由挂载。"""
+"""FastAPI 应用入口：lifespan 建表/兼容迁移、CORS、异常处理、路由挂载。"""
 import logging
 from contextlib import asynccontextmanager
 
@@ -24,7 +24,7 @@ logger = logging.getLogger(__name__)
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    # 启动：建表 + 种子 admin + 存储目录 + BM25 预热
+    # 启动：建表、兼容迁移、存储目录与 BM25 预热
     settings.storage_path.mkdir(parents=True, exist_ok=True)
     settings.chroma_persist_path.mkdir(parents=True, exist_ok=True)
     async with SessionLocal() as db:
@@ -47,7 +47,7 @@ async def lifespan(app: FastAPI):
     maintenance_task.cancel()
 
 
-app = FastAPI(title="RAG 知识库问答系统", version="1.0.0", lifespan=lifespan)
+app = FastAPI(title="知库 Knowbase · 知识工作台", version="1.0.0", lifespan=lifespan)
 
 app.add_middleware(
     CORSMiddleware,

@@ -67,7 +67,7 @@ class BM25IndexManager:
                     select(
                         Chunk.id, Chunk.content, Chunk.page_number,
                         Chunk.row_start, Chunk.row_end, Chunk.heading_path,
-                        Chunk.kb_id, Document.filename, Document.file_path,
+                        Chunk.kb_id, Document.filename, Document.source_url,
                     )
                     .join(Document, Document.id == Chunk.document_id)
                     .where(Chunk.kb_id == kb_id, Document.deleted_at.is_(None))

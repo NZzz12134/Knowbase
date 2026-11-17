@@ -13,6 +13,7 @@ venv/
 
 # Storage (runtime data)
 backend/storage/
+backups/
 
 # Node
 node_modules/

@@ -1,6 +1,7 @@
-"""全局配置：单一来源（.env / 环境变量），Provider 与检索参数全部可配置切换。"""
+"""安装环境仅配置基础设施和运行参数；模型连接配置来自每个账号的数据库记录。"""
 from functools import lru_cache
 from pathlib import Path
+from urllib.parse import quote
 
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
@@ -25,27 +26,10 @@ class Settings(BaseSettings):
     JWT_ALGORITHM: str = "HS256"
     ACCESS_TOKEN_EXPIRE_MINUTES: int = 1440
 
-    # ===== LLM Provider =====
-    LLM_PROVIDER: str = "qwen"
-    LLM_MODEL: str = "qwen-plus"
-    # 默认为空：由 provider 映射表兜底默认地址；显式设置则覆盖（切换 provider 时更不易踩坑）
-    LLM_BASE_URL: str = ""
-    LLM_API_KEY: str = ""
+    # ===== 模型加密与生成参数（不包含模型连接默认值） =====
+    MODEL_CONFIG_ENCRYPTION_KEY: str = ""  # 为空时使用 JWT_SECRET 派生；API/worker 必须一致
     LLM_TEMPERATURE: float = 0.3
     LLM_MAX_TOKENS: int = 2048
-
-    # ===== Embedding Provider =====
-    EMBEDDING_PROVIDER: str = "dashscope"
-    EMBEDDING_MODEL: str = "text-embedding-v3"
-    EMBEDDING_BASE_URL: str = "https://dashscope.aliyuncs.com/compatible-mode/v1"
-    EMBEDDING_API_KEY: str = ""
-
-    # ===== Rerank =====
-    RERANK_ENABLED: bool = True
-    RERANK_PROVIDER: str = "dashscope"  # dashscope(原生端点) | siliconflow 等(OpenAI 兼容)
-    RERANK_MODEL: str = "gte-rerank"
-    RERANK_BASE_URL: str = "https://dashscope.aliyuncs.com/compatible-mode/v1"
-    RERANK_API_KEY: str = ""
 
     # ===== 检索 =====
     RETRIEVAL_MODE: str = "hybrid"  # hybrid | vector
@@ -77,7 +61,7 @@ class Settings(BaseSettings):
     @property
     def database_url(self) -> str:
         return (
-            f"mysql+asyncmy://{self.MYSQL_USER}:{self.MYSQL_PASSWORD}"
+            f"mysql+asyncmy://{quote(self.MYSQL_USER, safe='')}:{quote(self.MYSQL_PASSWORD, safe='')}"
             f"@{self.MYSQL_HOST}:{self.MYSQL_PORT}/{self.MYSQL_DB}?charset=utf8mb4"
         )
 
@@ -92,6 +76,27 @@ class Settings(BaseSettings):
     @property
     def chroma_persist_path(self) -> Path:
         return BASE_DIR / self.CHROMA_PERSIST_DIR
+
+
+class ModelSettings(Settings):
+    """仅由 runtime_settings.model_construct 构建，不从环境加载模型名称、端点或密钥。"""
+
+    MODEL_CONFIG_REVISION: int = 0
+    EMBEDDING_INDEX_NAMESPACE: str = ""
+    LLM_MODE: str = "api"
+    LLM_MODEL: str = ""
+    LLM_BASE_URL: str = ""
+    LLM_API_KEY: str = ""
+    EMBEDDING_MODE: str = "api"
+    EMBEDDING_MODEL: str = ""
+    EMBEDDING_BASE_URL: str = ""
+    EMBEDDING_API_KEY: str = ""
+    RERANK_ENABLED: bool = False
+    RERANK_MODE: str = "api"
+    RERANK_PROVIDER: str = "openai"
+    RERANK_MODEL: str = ""
+    RERANK_BASE_URL: str = ""
+    RERANK_API_KEY: str = ""
 
 
 @lru_cache

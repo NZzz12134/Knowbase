@@ -41,6 +41,9 @@ request.interceptors.response.use(
   (response) => response.data,
   async (error) => {
     const status = error.response?.status
+    if (error.response?.data instanceof Blob) {
+      try { error.response.data = JSON.parse(await error.response.data.text()) } catch (_) {}
+    }
     const message = extractErrorMessage(error.response?.data?.detail)
 
     if (status === 401) {
@@ -49,8 +52,12 @@ request.interceptors.response.use(
       ElMessage.error(message || '无权访问')
     } else if (status === 429) {
       ElMessage.warning(message || '请求过于频繁，请稍后再试')
+    } else if (status === 428 && error.response?.data?.detail?.code === 'model_config_required') {
+      ElMessage.warning(message || '请先配置自己的模型')
     } else if (message) {
       ElMessage.error(message)
+    } else if (!status) {
+      ElMessage.error('网络连接失败或请求超时，请检查网络后重试。')
     }
     return Promise.reject(error)
   }

@@ -31,12 +31,11 @@ async def register(db: AsyncSession, data: RegisterIn) -> tuple[str, User]:
         username=data.username,
         email=data.email,
         hashed_password=hash_password(data.password),
-        role="user",
     )
     db.add(user)
     await db.commit()
     await db.refresh(user)
-    token = create_access_token(user.id, user.role)
+    token = create_access_token(user.id)
     return token, user
 
 
@@ -70,7 +69,7 @@ async def login(db: AsyncSession, data: LoginIn) -> tuple[str, User]:
     user.last_login_at = utcnow()
     await db.commit()
     await db.refresh(user)
-    token = create_access_token(user.id, user.role)
+    token = create_access_token(user.id)
     return token, user
 
 
