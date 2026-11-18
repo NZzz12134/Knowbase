@@ -18,6 +18,15 @@ ADMIN_PASSWORD = "123456"
 async def create_tables() -> None:
     async with engine.begin() as conn:
         await conn.run_sync(Base.metadata.create_all)
+        # 可配置的大输出可能超过 MySQL TEXT 的 64KB，升级时只扩容，不改动正文。
+        if conn.dialect.name == "mysql":
+            kind = await conn.exec_driver_sql(
+                "SELECT DATA_TYPE FROM INFORMATION_SCHEMA.COLUMNS "
+                "WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'messages' AND COLUMN_NAME = 'content'"
+            )
+            if kind.scalar_one_or_none() in ("text", "tinytext"):
+                await conn.exec_driver_sql("ALTER TABLE messages MODIFY COLUMN content MEDIUMTEXT NOT NULL")
+                logger.info("Expanded messages.content to MEDIUMTEXT for long answers")
 
 
 async def seed_admin(db: AsyncSession) -> None:

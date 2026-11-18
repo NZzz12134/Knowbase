@@ -29,7 +29,7 @@ class Settings(BaseSettings):
     # ===== 模型加密与生成参数（不包含模型连接默认值） =====
     MODEL_CONFIG_ENCRYPTION_KEY: str = ""  # 为空时使用 JWT_SECRET 派生；API/worker 必须一致
     LLM_TEMPERATURE: float = 0.3
-    LLM_MAX_TOKENS: int = 2048
+    LLM_MAX_TOKENS: int = 8192
 
     # ===== 检索 =====
     RETRIEVAL_MODE: str = "hybrid"  # hybrid | vector
@@ -82,6 +82,7 @@ class ModelSettings(Settings):
     """仅由 runtime_settings.model_construct 构建，不从环境加载模型名称、端点或密钥。"""
 
     MODEL_CONFIG_REVISION: int = 0
+    SHOW_REASONING: bool = True
     EMBEDDING_INDEX_NAMESPACE: str = ""
     LLM_MODE: str = "api"
     LLM_MODEL: str = ""

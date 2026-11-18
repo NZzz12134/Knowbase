@@ -21,6 +21,7 @@ from app.core.exceptions import BusinessError
 from app.core.rate_limit import limiter, user_or_ip_key
 from app.models import ChatSession, Citation, Feedback, Message, User
 from app.services.message_order import message_order
+from app.services.providers.answer_stream import MAX_REASONING_CHARS
 from app.schemas.chat_schema import ChatIn
 from app.services import message_service
 from app.services.personal_access import active_kb_ids, retrieval_scope
@@ -52,6 +53,8 @@ async def chat_stream(
         await _llm_semaphore.acquire()
         assistant_msg = None
         full_content: list[str] = []
+        reasoning_parts: list[str] = []
+        reasoning_length = 0
         next_event_task = None
         try:
             await db.execute(select(ChatSession.id).where(ChatSession.id == data.session_id).with_for_update())
@@ -112,16 +115,25 @@ async def chat_stream(
                     return
 
                 if event == "citations":
-                    assistant_msg.token_usage = {"answer_mode": payload.get("answer_mode", "knowledge" if payload["citations"] else "general")}
+                    assistant_msg.token_usage = {**(assistant_msg.token_usage or {}), "answer_mode": payload.get("answer_mode", "knowledge" if payload["citations"] else "general")}
                     await message_service.save_citations(db, assistant_msg.id, payload["citations"])
                     yield sse_event("citations", payload)
                 elif event == "token":
                     full_content.append(payload["content"])
                     yield sse_event("token", payload)
+                elif event == "reasoning" and model_settings.SHOW_REASONING:
+                    piece = payload.get("content", "")[:MAX_REASONING_CHARS - reasoning_length]
+                    if piece:
+                        reasoning_parts.append(piece)
+                        reasoning_length += len(piece)
+                        assistant_msg.token_usage = {**(assistant_msg.token_usage or {}), "reasoning_content": "".join(reasoning_parts)}
+                        yield sse_event("reasoning", {"content": piece})
                 elif event == "usage":
                     assistant_msg.token_usage = {**(assistant_msg.token_usage or {}), **payload}
                 next_event_task = asyncio.ensure_future(stream.__anext__())
 
+            if not "".join(full_content).strip():
+                raise BusinessError("empty_answer", "模型没有返回回答正文，请重试或检查模型的输出长度设置。", 502)
             await message_service.finalize_message(
                 db, assistant_msg, "".join(full_content), status="completed"
             )

@@ -48,6 +48,8 @@ request.interceptors.response.use(
 
     if (status === 401) {
       await handleUnauthorized(message)
+    } else if (error.config?.skipErrorNotification) {
+      // 调用方提供了错误状态与重试入口（例如首次加载会话列表）。
     } else if (status === 403) {
       ElMessage.error(message || '无权访问')
     } else if (status === 429) {

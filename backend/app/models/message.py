@@ -3,7 +3,7 @@ from datetime import datetime
 from typing import Any
 
 from sqlalchemy import JSON, ForeignKey, Index, String, Text, Uuid
-from sqlalchemy.dialects.mysql import DATETIME
+from sqlalchemy.dialects.mysql import DATETIME, MEDIUMTEXT
 from sqlalchemy.orm import Mapped, mapped_column
 
 from app.db.base import Base, UUIDPkMixin, utcnow
@@ -19,7 +19,7 @@ class Message(Base, UUIDPkMixin):
         Uuid(as_uuid=True), ForeignKey("chat_sessions.id", ondelete="CASCADE"), nullable=False
     )
     role: Mapped[str] = mapped_column(String(10), nullable=False)  # user | assistant
-    content: Mapped[str] = mapped_column(Text, nullable=False)
+    content: Mapped[str] = mapped_column(Text().with_variant(MEDIUMTEXT(), "mysql"), nullable=False)
     # generating(流式中) | completed | failed | stopped(客户端断开)
     status: Mapped[str] = mapped_column(
         String(20), nullable=False, default="completed", server_default="completed"

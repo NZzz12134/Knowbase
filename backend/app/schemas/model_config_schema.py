@@ -30,6 +30,8 @@ class ModelConfigIn(BaseModel):
     embedding: ModelEndpoint
     rerank: ModelEndpoint | None = None
     rerank_enabled: bool = False
+    max_output_tokens: int | None = Field(None, ge=128, le=131072, strict=True)
+    show_reasoning: bool | None = None
 
     @model_validator(mode="after")
     def validate_protocols(self):

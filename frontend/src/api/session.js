@@ -1,8 +1,8 @@
 import request from './request'
 
 export const sessionApi = {
-  list(params) {
-    return request.get('/sessions', { params })
+  list(params, config = {}) {
+    return request.get('/sessions', { ...config, params })
   },
   create(data) {
     return request.post('/sessions', data)

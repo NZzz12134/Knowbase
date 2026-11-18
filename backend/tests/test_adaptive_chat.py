@@ -141,3 +141,84 @@ async def test_no_candidates_skips_relevance_model(monkeypatch):
         pytest.fail('Empty candidates must skip relevance model')
     monkeypatch.setattr(relevance, 'get_llm', unexpected)
     assert await relevance.select_relevant_chunks('问题', []) == []
+
+
+@pytest.mark.parametrize('content,finish,code', [
+    ('', 'length', 'answer_token_limit'),
+    ('<html>尚未写完', 'length', 'answer_token_limit'),
+    ('', 'stop', 'empty_answer'),
+    ('   \n', 'stop', 'empty_answer'),
+    ('', None, 'empty_answer'),
+])
+async def test_empty_or_truncated_answer_is_not_cached_as_success(flow, monkeypatch, content, finish, code):
+    from langchain_core.messages import AIMessageChunk
+    from langchain_core.runnables import RunnableGenerator
+
+    async def upstream(inputs):
+        async for _ in inputs:
+            pass
+        yield AIMessageChunk(content='', additional_kwargs={'reasoning_content':'内部推理'})
+        yield AIMessageChunk(content=content)
+        yield AIMessageChunk(content='', response_metadata={'finish_reason':finish} if finish else {})
+
+    monkeypatch.setattr(chain_module, 'get_llm', lambda: RunnableGenerator(upstream))
+    events = []
+    with pytest.raises(BusinessError) as exc:
+        with retrieval_scope(uuid.UUID(int=1), ()):
+            async for event in chain_module.run_qa_stream(None, '写一个完整动画', []):
+                events.append(event)
+    assert exc.value.code == code
+    assert ''.join(p['content'] for e, p in events if e == 'token') == content
+    assert all(e != 'usage' for e, _ in events)
+    flow['write'].assert_not_awaited()
+
+
+async def test_empty_cached_answer_is_regenerated(flow):
+    flow['read'].return_value = {'answer':'  \n', 'citations':[]}
+    events = await collect(has_kb=False)
+    assert ''.join(p['content'] for e, p in events if e == 'token') == '直接回答内容'
+    assert events[-1][1]['cached'] is False
+    flow['write'].assert_awaited_once()
+
+
+async def test_text_blocks_exclude_reasoning_and_keep_complete_answer(flow, monkeypatch):
+    from langchain_core.messages import AIMessageChunk
+    from langchain_core.runnables import RunnableGenerator
+
+    async def upstream(inputs):
+        async for _ in inputs:
+            pass
+        yield AIMessageChunk(content=[{'type':'reasoning', 'text':'内部推理'}, {'type':'text', 'text':'完整正文'}])
+        yield AIMessageChunk(content='', response_metadata={'finish_reason':'stop'})
+
+    monkeypatch.setattr(chain_module, 'get_llm', lambda: RunnableGenerator(upstream))
+    events = await collect(has_kb=False)
+    assert ''.join(p['content'] for e, p in events if e == 'token') == '完整正文'
+    assert flow['write'].await_args.args[-2] == '完整正文'
+    assert ''.join(p['content'] for e, p in events if e == 'reasoning') == '内部推理'
+    assert flow['write'].await_args.kwargs['reasoning_content'] == '内部推理'
+
+
+@pytest.mark.parametrize('enabled', [True, False])
+async def test_reasoning_setting_applies_to_live_and_cached_answers(flow, monkeypatch, enabled):
+    from langchain_core.messages import AIMessageChunk
+    from langchain_core.runnables import RunnableGenerator
+    from app.services.model_config_service import get_model_settings, model_settings_scope
+
+    async def upstream(inputs):
+        async for _ in inputs:
+            pass
+        yield AIMessageChunk(content='', additional_kwargs={'reasoning_content':'先检查边界'})
+        yield AIMessageChunk(content='<thi')
+        yield AIMessageChunk(content='nk>标签中的思考</think>最终正文')
+
+    monkeypatch.setattr(chain_module, 'get_llm', lambda: RunnableGenerator(upstream))
+    with model_settings_scope(get_model_settings().model_copy(update={'SHOW_REASONING':enabled})):
+        live = await collect(has_kb=False)
+        flow['read'].return_value = {'answer':'最终正文','reasoning_content':'缓存思考'}
+        cached = await collect(has_kb=False)
+    assert ''.join(p['content'] for e,p in live if e == 'token') == '最终正文'
+    expected = '先检查边界标签中的思考' if enabled else ''
+    assert ''.join(p['content'] for e,p in live if e == 'reasoning') == expected
+    assert flow['write'].await_args.kwargs['reasoning_content'] == expected
+    assert ''.join(p['content'] for e,p in cached if e == 'reasoning') == ('缓存思考' if enabled else '')

@@ -8,7 +8,6 @@ import bash from 'highlight.js/lib/languages/bash'
 import sql from 'highlight.js/lib/languages/sql'
 import xml from 'highlight.js/lib/languages/xml'
 import css from 'highlight.js/lib/languages/css'
-import 'highlight.js/styles/github.css'
 
 for (const [name,language] of Object.entries({ javascript, typescript, python, json, bash, sql, xml, css })) hljs.registerLanguage(name, language)
 
@@ -19,15 +18,29 @@ const md = new MarkdownIt({
   highlight(str, lang) {
     if (lang && hljs.getLanguage(lang)) {
       try {
-        return `<pre class="hljs"><code>${hljs.highlight(str, { language: lang }).value}</code></pre>`
+        return hljs.highlight(str, { language: lang }).value
       } catch (_) {
         /* fallthrough */
       }
     }
-    return `<pre class="hljs"><code>${md.utils.escapeHtml(str)}</code></pre>`
+    return md.utils.escapeHtml(str)
   },
 })
 
-export function renderMarkdown(text) {
-  return md.render(text || '')
+function renderCodeBlock(code, language, env) {
+  const index = env.codeBlocks.push(code) - 1
+  const highlighted = md.options.highlight(code, language)
+  const copied = env.copiedIndex === index
+  const label = md.utils.escapeHtml(language || '纯文本')
+  return `<div class="code-block"><div class="code-block-toolbar"><span class="code-language">${label}</span><button type="button" class="code-copy-button" data-code-index="${index}" aria-label="${copied ? '代码已复制' : '复制代码'}">${copied ? '已复制' : '复制代码'}</button></div><pre tabindex="0" aria-label="代码内容"><code class="hljs">${highlighted}</code></pre></div>\n`
+}
+
+md.renderer.rules.fence = (tokens, index, options, env) =>
+  renderCodeBlock(tokens[index].content, tokens[index].info.trim().split(/\s+/)[0], env)
+md.renderer.rules.code_block = (tokens, index, options, env) =>
+  renderCodeBlock(tokens[index].content, '', env)
+
+export function renderMarkdown(text, env = {}) {
+  env.codeBlocks = []
+  return md.render(text || '', env)
 }

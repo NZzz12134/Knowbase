@@ -8,8 +8,8 @@
       </el-button>
       <div class="session-search"><el-icon aria-hidden="true"><Search /></el-icon><input v-model="search" aria-label="搜索会话" name="session-search" autocomplete="off" placeholder="搜索你的对话…" /></div>
     </div>
-    <div class="session-caption">最近对话<span>{{ filteredSessions.length }}</span></div>
-    <div class="session-list">
+    <div class="session-caption">最近对话<span>{{ store.loaded ? filteredSessions.length : '—' }}</span></div>
+    <div class="session-list" :aria-busy="store.loading">
       <TransitionGroup name="session">
       <div
         v-for="s in filteredSessions"
@@ -39,7 +39,9 @@
         </el-dropdown>
       </div>
       </TransitionGroup>
-      <div v-if="!filteredSessions.length" class="no-sessions">{{ search ? '没有找到匹配的对话' : '你的思考，从这里开始。' }}</div>
+      <div v-if="store.loading && !store.loaded" class="no-sessions" role="status">正在加载最近对话…</div>
+      <div v-else-if="store.loadError" class="session-load-error" role="alert"><p>{{ store.loadError }}</p><el-button link type="primary" :loading="store.loading" @click="$emit('retry')">重新加载</el-button></div>
+      <div v-else-if="!filteredSessions.length" class="no-sessions">{{ search ? '没有找到匹配的对话' : '你的思考，从这里开始。' }}</div>
     </div>
     <div class="sidebar-bottom">
       <RouterLink to="/space/library" class="sidebar-admin"><el-icon aria-hidden="true"><Collection /></el-icon><span>我的知识空间</span><span aria-hidden="true">↗</span></RouterLink>
@@ -87,7 +89,7 @@ const sessions = computed(() => store.sessions)
 const currentId = computed(() => store.currentId)
 const filteredSessions = computed(() => sessions.value.filter(s => `${s.title} ${s.last_message_preview || ''}`.toLowerCase().includes(search.value.toLowerCase())))
 
-const emit = defineEmits(['changed', 'close'])
+const emit = defineEmits(['changed', 'close', 'retry'])
 watch(() => props.open, async open => {
   if (open) { returnFocus = document.activeElement; await nextTick(); sidebarRef.value?.querySelector('.sidebar-close')?.focus() }
   else returnFocus?.focus()
@@ -223,5 +225,6 @@ async function onItemCommand(command, session) {
 .kb-hint { font-size: 12px; color: #909399; line-height: 1.5; margin-top: 4px; }
 .sidebar-bottom { padding: 16px 18px 18px; }.sidebar-note { display: flex; align-items: center; gap: 12px; border: 1px solid #dbe3d3; padding: 14px 10px; border-radius: 9px; }.note-mark { font-size: 21px; color: #668153; }.sidebar-note strong { font-size: 11px; font-weight: 550; }.sidebar-note p { font-size: 10px; color: #74806e; margin-top: 5px; }.sidebar-admin { display: flex; align-items: center; gap: 10px; padding: 15px 4px; font-size: 12px; color: #52644e; }.sidebar-admin .el-icon:last-child { margin-left: auto; }.sidebar-admin:hover { color: var(--accent); }.sidebar-foot { display: flex; justify-content: space-between; font-size: 9px; color: #778370; padding-top: 12px; border-top: 1px solid #dce3d6; }.sidebar-foot span:first-child { letter-spacing: 1.7px; }.no-sessions { padding: 35px 10px; text-align: center; font-size: 11px; color: var(--muted); }
 .session-enter-active,.session-move { transition: transform .25s var(--ease), opacity .25s; }.session-leave-active { transition: opacity .15s; }.session-enter-from { opacity: 0; transform: translateY(-5px); }.session-leave-to { opacity: 0; }.sidebar-backdrop { display: none; }
+.session-load-error { padding: 24px 10px; text-align: center; color: var(--muted); font-size: 12px; line-height: 1.8; }.session-load-error .el-button { margin-top: 8px; }
 @media (max-width: 800px) { .sidebar { position: fixed; top: 0; bottom: 0; left: 0; z-index: 101; width: min(300px,85vw); transform: translateX(-100%); visibility: hidden; transition: transform .28s var(--ease), visibility .28s; }.sidebar--open { transform: translateX(0); visibility: visible; }.sidebar-close { display: flex; }.sidebar-backdrop { display: block; position: fixed; inset: 0; z-index: 100; border: 0; background: #1a2b2366; animation: appear .16s; } }
 </style>

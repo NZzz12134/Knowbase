@@ -167,6 +167,7 @@ async def list_messages(
                 "feedback": feedback_map.get(m.id),
                 "citations_count": citations_map.get(m.id, 0),
                 "answer_mode": (m.token_usage or {}).get("answer_mode"),
+                "reasoning_content": (m.token_usage or {}).get("reasoning_content", ""),
             }
             for m in messages
         ],

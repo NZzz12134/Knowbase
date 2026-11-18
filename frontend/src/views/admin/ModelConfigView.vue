@@ -24,7 +24,7 @@
       <el-card v-for="(item,index) in roles" :key="item.key" class="model-card" shadow="never">
         <template #header>
           <div class="card-header">
-            <strong><span class="model-step">0{{ index + 1 }}</span>{{ item.title }}</strong>
+            <h2 class="model-card-title"><span class="model-step">0{{ index + 1 }}</span>{{ item.title }}</h2>
             <el-switch v-if="item.key === 'rerank'" v-model="form.rerank_enabled" aria-label="启用重排" active-text="启用重排" />
           </div>
         </template>
@@ -54,6 +54,15 @@
             <el-checkbox v-if="form[item.key].api_key_configured" v-model="form[item.key].clear_key">清除已保存密钥</el-checkbox>
           </el-form-item>
         </div>
+        <section v-if="item.key === 'llm'" class="generation-settings" aria-label="回答生成设置">
+          <h3>回答生成设置</h3>
+          <el-form-item label="最大输出长度（token）" for="max-output-tokens">
+            <el-input-number id="max-output-tokens" v-model="form.max_output_tokens" name="max-output-tokens" autocomplete="off" :min="128" :max="131072" :step="1024" :precision="0" :value-on-clear="8192" controls-position="right" aria-label="最大输出长度（token）" aria-describedby="output-length-help" />
+            <p id="output-length-help" class="field-help">范围 128–131072，需在模型支持范围内。思考和正文可能共用额度；长代码可尝试 16384 或 32768，越大可能越慢、费用越高。</p>
+          </el-form-item>
+          <el-switch v-model="form.show_reasoning" aria-label="显示模型思考过程" active-text="显示模型思考过程" />
+          <p class="field-help">仅展示模型实际返回的思考内容，可在回答中展开查看。关闭后，新回答不展示或保存思考内容，不改变模型本身的思考模式。</p>
+        </section>
         <el-alert v-if="form[item.key].mode === 'ollama' && (item.key !== 'rerank' || form.rerank_enabled)" :closable="false" type="info" :title="item.key === 'rerank' ? 'Ollama 没有原生 Rerank 接口：此模式使用支持 JSON 输出的对话模型逐文档评分，例如 qwen3:8b，速度取决于本地硬件。专用重排模型请选择 API 服务。' : '请先在 Ollama 拉取模型。服务地址由后端和解析 worker 访问；Docker 部署访问宿主机通常使用 http://host.docker.internal:11434。'" />
         <div v-if="item.key !== 'rerank' || form.rerank_enabled" class="test-row">
           <el-button :loading="testing === item.key" @click="test(item.key)">{{ testing === item.key ? '正在测试…' : '测试连接' }}</el-button>
@@ -86,7 +95,7 @@ const roles = [
   { key: 'embedding', title: 'Embedding 模型', description: '用于文档和问题向量化。请使用同一模型建立索引和检索。' },
   { key: 'rerank', title: 'Rerank 模型', description: '对检索候选内容重新排序；关闭后使用原检索顺序。' },
 ]
-const form = reactive({ revision: 0, rerank_enabled: false })
+const form = reactive({ revision: 0, rerank_enabled: false, max_output_tokens: 8192, show_reasoning: true })
 const loading = ref(false)
 const ready = ref(false)
 const saving = ref(false)
@@ -104,6 +113,8 @@ function applyConfig(config) {
   personalSaved.value = !!config.personal
   form.revision = config.revision
   form.rerank_enabled = config.rerank_enabled
+  form.max_output_tokens = config.max_output_tokens ?? 8192
+  form.show_reasoning = config.show_reasoning ?? true
   for (const { key } of roles) {
     form[key] = { ...config[key], api_key: '', clear_key: false }
     delete results[key]
@@ -170,6 +181,10 @@ async function test(role) {
 
 async function save() {
   if (!ready.value || !roles.every(({ key }) => valid(key))) return
+  if (!Number.isInteger(form.max_output_tokens) || form.max_output_tokens < 128 || form.max_output_tokens > 131072) {
+    ElMessage.warning('最大输出长度需为 128–131072 之间的整数')
+    return
+  }
   if (personalSaved.value && savedEmbedding !== identity(form.embedding)) {
     try {
       await ElMessageBox.confirm('Embedding 配置已变化。保存后请在文档管理重新解析已有文档，新向量索引建立前可能无法检索旧内容。', '更换 Embedding 模型', { confirmButtonText: '保存配置', cancelButtonText: '继续编辑', type: 'warning' })
@@ -177,7 +192,7 @@ async function save() {
   }
   saving.value = true
   try {
-    const data = { revision: form.revision, rerank_enabled: form.rerank_enabled }
+    const data = { revision: form.revision, rerank_enabled: form.rerank_enabled, max_output_tokens: form.max_output_tokens, show_reasoning: form.show_reasoning }
     for (const { key } of roles) data[key] = payload(key)
     const response = await modelConfigApi.save(data)
     const firstSave = !personalSaved.value
@@ -201,9 +216,11 @@ onBeforeRouteLeave(async () => {
 </script>
 
 <style scoped>
+.generation-settings { margin: 8px 0 20px; padding: 18px; background: var(--canvas); border: 1px solid var(--line); border-radius: 10px; }.generation-settings h3 { font-size: 14px; margin-bottom: 16px; }.field-help { color: var(--muted); font-size: 12px; line-height: 1.8; margin: 8px 0 0; width: 100%; }.generation-settings :deep(.el-form-item__content) { align-items: flex-start; }
 .setup-guide { padding: 24px; margin-bottom: 20px; background: var(--accent-soft); border: 1px solid var(--line); border-radius: 12px; }.setup-guide h2 { margin: 10px 0; font-size: 21px; }.setup-guide p,.setup-guide ol { font-size: 13px; line-height: 1.9; color: var(--muted); }.setup-guide ol { padding-left: 20px; margin-top: 12px; }.setup-complete { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 12px; padding: 18px; margin-top: 16px; border-radius: 10px; background: var(--accent-soft); font-size: 13px; }.setup-complete a { font-weight: 600; }
 .model-config { max-width: 1100px; margin: 0 auto; }.save-actions { display: flex; align-items: center; gap: 12px; }.unsaved-indicator { font-size: 11px; color: #9a6d29; }.model-flow { display: grid; grid-template-columns: repeat(3,1fr); margin-bottom: 24px; background: #fff; border: 1px solid var(--line); border-radius: 12px; padding: 22px; gap: 20px; }.model-flow>div { display: flex; align-items: center; gap: 12px; min-width: 0; }.model-flow strong { font-size: 12px; font-weight: 550; }.model-flow p { font-size: 10px; color: var(--muted); margin-top: 6px; }.flow-arrow { color: #a5b493; margin-left: auto; }.model-flow .model-step { flex-shrink: 0; }
 .page-header, .card-header { display: flex; justify-content: space-between; align-items: center; gap: 16px; }
+.model-card-title { margin: 0; font-size: 16px; font-weight: 600; }
 h3 { margin: 0; }
 .page-header { margin-bottom: 20px; }
 .page-header p, .description { color: #606266; font-size: 14px; line-height: 1.6; }

@@ -71,7 +71,7 @@ docker compose up -d --build
 
 ### 表结构升级（重要）
 
-启动会自动创建新增表（包括 `model_configs`、`user_model_configs`），但 `create_all` 不会修改已有列。当前消息顺序使用微秒时间戳，无需新增 `seq` 列。由更早版本升级时，先用 `SHOW COLUMNS FROM messages LIKE 'created_at';` 检查：若仍为 `datetime`，应在备份后执行 `ALTER TABLE messages MODIFY COLUMN created_at DATETIME(6) NOT NULL;`。已有相同时间的旧消息按角色和 ID 稳定排序，无法完全还原已经丢失的时间精度。回答模式写入现有 `token_usage` JSON，无需新增列。
+启动会自动创建新增表（包括 `model_configs`、`user_model_configs`），并将消息正文的旧 `TEXT` / `TINYTEXT` 列扩容为 `MEDIUMTEXT`，支持超过 64KB 的长回答；扩容保留已有正文，可重复启动，数据库账号需具备 `ALTER` 权限。除此以外，`create_all` 不会修改已有列。当前消息顺序使用微秒时间戳，无需新增 `seq` 列。由更早版本升级时，先用 `SHOW COLUMNS FROM messages LIKE 'created_at';` 检查：若仍为 `datetime`，应在备份后执行 `ALTER TABLE messages MODIFY COLUMN created_at DATETIME(6) NOT NULL;`。已有相同时间的旧消息按角色和 ID 稳定排序，无法完全还原已经丢失的时间精度。回答模式写入现有 `token_usage` JSON，无需新增列。
 
 ### 上线检查清单
 
@@ -90,7 +90,9 @@ docker compose up -d --build
 
 首次升级须重建前端并重启后端和 worker，后端自动创建 `user_model_configs` 表。密钥使用 `MODEL_CONFIG_ENCRYPTION_KEY`（为空则使用 `JWT_SECRET`）派生密钥加密，API / worker 必须一致；数据库恢复时须同时保留原加密密钥。
 
-Ollama 地址填写后端可达的根地址（本机 `http://localhost:11434`；Docker 访问宿主机通常为 `http://host.docker.internal:11434`），先用 `ollama pull` 安装相应模型。对话通过 `/v1/chat/completions`，向量通过原生 `/api/embed`，重排通过 `/api/chat` 的 JSON 相关性评分实现，需要支持 JSON 输出的对话模型。专用 Rerank API 使用通用 `/rerank` 或 DashScope 原生协议。
+Ollama 地址填写后端可达的根地址（本机 `http://localhost:11434`；Docker 访问宿主机通常为 `http://host.docker.internal:11434`），先用 `ollama pull` 安装相应模型。对话通过原生 `/api/chat` 保留 `message.thinking`，向量通过 `/api/embed`，重排通过 `/api/chat` 的 JSON 相关性评分实现，需要支持 JSON 输出的对话模型。专用 Rerank API 使用通用 `/rerank` 或 DashScope 原生协议。
+
+个人输出上限和思考展示开关在「我的模型 → 回答生成设置」修改，保存到已有配置 JSON，无需新增列，保存后新请求立即生效。旧记录缺字段时使用 `LLM_MAX_TOKENS` 默认值和开启的思考展示；个人值一旦保存便覆盖环境默认值。思考保存在现有消息 JSON 中，按会话所有权访问，失败/停止时保留已收到的内容。升级需重新构建前端并重启 API / worker，以加载新增协议处理。
 
 | 场景 | 操作 |
 |---|---|

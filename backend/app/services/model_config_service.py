@@ -22,8 +22,13 @@ def _cipher():
     return Fernet(base64.urlsafe_b64encode(hashlib.sha256(secret.encode()).digest()))
 
 
+def generation_options(config):
+    return {"max_output_tokens": config.get("max_output_tokens") or get_settings().LLM_MAX_TOKENS,
+            "show_reasoning": config.get("show_reasoning", True)}
+
+
 def empty_config():
-    return {"revision": 0, "rerank_enabled": False, **{
+    return {"revision": 0, "rerank_enabled": False, **generation_options({}), **{
         role: {"mode": "api", "model": "", "base_url": "", "api_key": "", "protocol": "openai"}
         for role in ROLES
     }}
@@ -41,7 +46,7 @@ async def read_config(db, user_id=None):
     row = (await db.execute(stmt)).scalar_one_or_none()
     if row is None:
         return empty_config()
-    result = {**row.config, "revision": row.revision}
+    result = {**row.config, **generation_options(row.config), "revision": row.revision}
     # 旧版本未记录命名空间时沿用其模型名索引，避免升级后丢失检索入口。
     result.setdefault("embedding_index_namespace", hashlib.md5(result["embedding"]["model"].encode()).hexdigest()[:8])
     try:
@@ -56,7 +61,7 @@ async def read_config(db, user_id=None):
 
 
 def public_config(config):
-    result = {"revision": config["revision"], "rerank_enabled": config["rerank_enabled"]}
+    result = {"revision": config["revision"], "rerank_enabled": config["rerank_enabled"], **generation_options(config)}
     for role in ROLES:
         endpoint = {k: v for k, v in config[role].items() if k != "api_key"}
         endpoint["api_key_configured"] = bool(config[role].get("api_key"))
@@ -75,6 +80,10 @@ async def save_config(db, data: ModelConfigIn, user_id=None):
     if data.revision != previous["revision"]:
         raise BusinessError("config_conflict", "配置已在其他窗口修改，请刷新后重试", 409)
     resolved = {"rerank_enabled": data.rerank_enabled}
+    options = generation_options(previous)
+    for key in options:
+        incoming = getattr(data, key)
+        resolved[key] = options[key] if incoming is None else incoming
     for role in ROLES:
         incoming = getattr(data, role)
         endpoint = resolve_endpoint(incoming, previous[role]) if incoming is not None else dict(previous[role])
@@ -119,15 +128,17 @@ def get_model_settings():
 
 
 def runtime_settings(config):
+    options = generation_options(config)
     updates = {"RERANK_ENABLED": config["rerank_enabled"], "MODEL_CONFIG_REVISION": config["revision"],
-               "EMBEDDING_INDEX_NAMESPACE": config.get("embedding_index_namespace", "")}
+               "EMBEDDING_INDEX_NAMESPACE": config.get("embedding_index_namespace", ""),
+               "LLM_MAX_TOKENS": options["max_output_tokens"], "SHOW_REASONING": options["show_reasoning"]}
     for role, prefix in ROLES.items():
         ep = config[role]
         updates.update({f"{prefix}_MODEL": ep["model"], f"{prefix}_BASE_URL": ep["base_url"],
                         f"{prefix}_API_KEY": ep["api_key"], f"{prefix}_MODE": ep["mode"]})
         if role == "rerank":
             updates["RERANK_PROVIDER"] = ep["protocol"]
-    return ModelSettings.model_construct(**get_settings().model_dump(), **updates)
+    return ModelSettings.model_construct(**{**get_settings().model_dump(), **updates})
 
 
 @contextmanager

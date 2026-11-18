@@ -29,7 +29,9 @@ async def export_archive(db, user):
                        "file_type": d.file_type, "source_url": d.source_url,
                        "archive_path": f"documents/{d.id}.{d.file_type}" if d.file_type != "url" else None} for d in docs],
         "sessions": [{"id": str(s.id), "title": s.title, "kb_id": str(s.kb_id) if s.kb_id else None,
-                      "messages": [{"id": str(m.id), "role": m.role, "content": m.content, "status": m.status, "created_at": m.created_at.isoformat()}
+                      "messages": [{"id": str(m.id), "role": m.role, "content": m.content, "status": m.status, "created_at": m.created_at.isoformat(),
+                                    "reasoning_content": (m.token_usage or {}).get("reasoning_content", ""),
+                                    "answer_mode": (m.token_usage or {}).get("answer_mode")}
                                    for m in messages if m.session_id == s.id]} for s in sessions]}
     # Preserve source snapshots without leaking file-system paths or another owner's citations.
     sources = (await db.execute(select(Citation, Chunk, Document).join(Chunk, Chunk.id == Citation.chunk_id)
@@ -81,6 +83,8 @@ class ArchiveMessage(BaseModel):
     role: str
     content: str = Field(max_length=2_000_000)
     status: str = "completed"
+    reasoning_content: str = Field("", max_length=200_000)
+    answer_mode: str | None = None
 
 
 class ArchiveSession(BaseModel):
@@ -164,6 +168,8 @@ async def import_archive(db, user, file):
                         raise ValueError("备份消息角色无效")
                     db.add(Message(session_id=session.id, role=m.role, content=m.content,
                                    status="completed" if m.status == "completed" else "stopped",
+                                   token_usage={"reasoning_content": m.reasoning_content,
+                                                "answer_mode": m.answer_mode if m.answer_mode in ("general", "knowledge") else None},
                                    created_at=start + timedelta(microseconds=idx)))
             await db.commit()
     except (ValueError, KeyError, zipfile.BadZipFile, ValidationError) as exc:

@@ -18,6 +18,7 @@ class MessageOut(BaseModel):
     feedback: str | None = None
     citations_count: int = 0
     answer_mode: str | None = None
+    reasoning_content: str = ""
 
 
 class MessageListOut(BaseModel):

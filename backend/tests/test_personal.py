@@ -5,6 +5,7 @@ import json
 import uuid
 import zipfile
 from types import SimpleNamespace
+from unittest.mock import AsyncMock
 
 import pytest
 from sqlalchemy import delete, select
@@ -258,6 +259,82 @@ async def test_chat_retry_reuses_answer_and_skips_current_turn_history(client, m
     after = (await client.get(f'/api/v1/sessions/{sid}/messages', headers=a)).json()["items"]
     assert len(after) == 2 and after[-1]["id"] == mid
     assert seen[-1] == ('原问题', [], True, 'my-chat', str(aid))
+
+
+@pytest.mark.parametrize('show_reasoning', [True, False])
+async def test_reasoning_persists_through_reload_retry_and_backup(client, monkeypatch, show_reasoning):
+    from app.api.v1 import chat
+    from app.services import message_service
+    a, _ = await account(client)
+    data = model_payload()
+    data.update(show_reasoning=show_reasoning, max_output_tokens=16384)
+    assert (await client.put('/api/v1/me/model-config', json=data, headers=a)).status_code == 200
+    sid = (await client.post('/api/v1/sessions', json={}, headers=a)).json()['id']
+    reasoning = '先分析问题，再检查边界。'
+    async def stream(*args, **kwargs):
+        yield 'citations', {'citations':[], 'answer_mode':'general','mode':'general'}
+        yield 'reasoning', {'content':reasoning}
+        yield 'token', {'content':'最终答案'}
+    monkeypatch.setattr(chat, 'run_qa_stream', stream)
+    monkeypatch.setattr(message_service, 'auto_title_session', AsyncMock())
+    response = await client.post('/api/v1/chat/stream', json={'session_id':sid,'question':'问题'}, headers=a)
+    assert ('event: reasoning' in response.text) == show_reasoning
+    items = (await client.get(f'/api/v1/sessions/{sid}/messages', headers=a)).json()['items']
+    assert items[-1]['content'] == '最终答案'
+    assert items[-1]['reasoning_content'] == (reasoning if show_reasoning else '')
+    # 备份导入后仍保留思考，另一个账号无法访问原会话。
+    backup = await client.get('/api/v1/me/export', headers=a)
+    b, _ = await account(client)
+    assert (await client.get(f'/api/v1/sessions/{sid}/messages', headers=b)).status_code == 404
+    restored = await client.post('/api/v1/me/import', files={'file':('backup.zip',backup.content)}, headers=b)
+    assert restored.status_code == 200, restored.text
+    bsid = (await client.get('/api/v1/sessions', headers=b)).json()['items'][0]['id']
+    history = (await client.get(f'/api/v1/sessions/{bsid}/messages', headers=b)).json()['items']
+    assert history[-1]['reasoning_content'] == items[-1]['reasoning_content']
+    async def retry(*args, **kwargs):
+        yield 'citations', {'citations':[], 'answer_mode':'general','mode':'general'}
+        yield 'token', {'content':'新的回答，没有思考'}
+    monkeypatch.setattr(chat, 'run_qa_stream', retry)
+    await client.post('/api/v1/chat/stream', json={'session_id':sid,'question':'ignored','retry_message_id':items[-1]['id']}, headers=a)
+    items = (await client.get(f'/api/v1/sessions/{sid}/messages', headers=a)).json()['items']
+    assert len(items) == 2 and items[-1]['reasoning_content'] == ''
+
+
+@pytest.mark.parametrize('partial', ['', '<html>未完成的代码'])
+async def test_empty_or_truncated_stream_is_failed_and_can_retry(client, monkeypatch, partial):
+    from app.api.v1 import chat
+    from app.core.exceptions import BusinessError
+    from app.services import message_service
+    a, _ = await account(client)
+    assert (await client.put('/api/v1/me/model-config', json=model_payload(), headers=a)).status_code == 200
+    sid = (await client.post('/api/v1/sessions', json={}, headers=a)).json()['id']
+
+    async def broken(*args, **kwargs):
+        yield 'citations', {'citations':[], 'answer_mode':'general', 'mode':'general'}
+        yield 'reasoning', {'content':'尚在思考的内容'}
+        if partial:
+            yield 'token', {'content':partial}
+            raise BusinessError('answer_token_limit', '模型已达到输出长度上限，回答未完成。', 502)
+
+    monkeypatch.setattr(chat, 'run_qa_stream', broken)
+    monkeypatch.setattr(message_service, 'auto_title_session', AsyncMock())
+    response = await client.post('/api/v1/chat/stream', json={'session_id':sid,'question':'写一个动画'}, headers=a)
+    assert 'event: error' in response.text and 'event: done' not in response.text
+    items = (await client.get(f'/api/v1/sessions/{sid}/messages', headers=a)).json()['items']
+    assert len(items) == 2 and items[-1]['status'] == 'failed'
+    assert items[-1]['content'] == partial and items[-1]['error_message']
+    assert items[-1]['reasoning_content'] == '尚在思考的内容'
+
+    async def complete(*args, **kwargs):
+        yield 'citations', {'citations':[], 'answer_mode':'general', 'mode':'general'}
+        yield 'token', {'content':'完整回答'}
+
+    monkeypatch.setattr(chat, 'run_qa_stream', complete)
+    retry = await client.post('/api/v1/chat/stream', json={'session_id':sid,'question':'ignored','retry_message_id':items[-1]['id']}, headers=a)
+    assert 'event: done' in retry.text and 'event: error' not in retry.text
+    retried = (await client.get(f'/api/v1/sessions/{sid}/messages', headers=a)).json()['items']
+    assert len(retried) == 2 and retried[-1]['id'] == items[-1]['id']
+    assert retried[-1]['status'] == 'completed' and retried[-1]['content'] == '完整回答'
 
 
 async def test_export_restore_and_delete_only_own_data(client, db_session, monkeypatch):

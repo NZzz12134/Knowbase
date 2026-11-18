@@ -22,7 +22,11 @@
           <el-icon v-if="historyLoading" class="is-loading"><Loading /></el-icon>
         </button>
         <!-- 生成中状态提示：检索中 → 生成中 → 流式输出 -->
-        <div v-if="message.status === 'generating' && !message.content" class="thinking-tip">
+        <details v-if="message.reasoning_content" class="reasoning-panel">
+          <summary><el-icon v-if="message.status === 'generating' && !message.content" class="is-loading" aria-hidden="true"><Loading /></el-icon><span>{{ message.status === 'generating' && !message.content ? '正在思考…' : '模型思考过程' }}</span><span class="reasoning-toggle" aria-hidden="true">展开 / 收起</span></summary>
+          <div class="reasoning-content">{{ message.reasoning_content }}</div>
+        </details>
+        <div v-if="message.status === 'generating' && !message.content && !message.reasoning_content" class="thinking-tip">
           <el-icon class="is-loading"><Loading /></el-icon>
           <template v-if="message.citations?.length">
             已找到 {{ message.citations.length }} 个相关片段，正在生成回答…
@@ -32,25 +36,24 @@
             正在检索知识库…
           </template>
         </div>
-        <div
+        <MarkdownContent
           v-else-if="message.content"
-          class="markdown-body"
-          :class="{ 'streaming-cursor': streaming && message.status === 'generating' }"
-          v-html="renderMarkdown(message.content)"
-        ></div>
-        <div v-if="message.status === 'failed'" class="error-tip">
+          :content="message.content"
+          :streaming="streaming && message.status === 'generating'"
+        />
+        <div v-if="message.status === 'failed' || emptyAnswer" class="error-tip" role="alert">
           <el-icon><WarningFilled /></el-icon>
-          {{ message.error_message || '生成失败，请重试' }}
+          {{ message.error_message || (emptyAnswer ? '这条回答没有正文，请重新提问；若使用思考模型，可提高最大输出长度后重试。' : '生成失败，请重试') }}
         </div>
-        <div v-if="message.status === 'stopped' && message.content" class="stopped-tip">
+        <div v-if="message.status === 'stopped'" class="stopped-tip">
           已停止生成
         </div>
       </div>
 
       <div v-if="message.status !== 'generating'" class="actions">
-        <el-button v-if="canRetry" link type="primary" @click="$emit('retry')">{{ message.status === 'failed' ? '重试回答' : '重新生成' }}</el-button>
+        <el-button v-if="canRetry" link type="primary" @click="$emit('retry')">{{ message.status === 'failed' || emptyAnswer ? '重试回答' : '重新生成' }}</el-button>
         <button v-if="message.content" class="copy-action" :aria-label="copied ? '已复制回答' : '复制回答'" @click="copyAnswer"><el-icon aria-hidden="true"><Check v-if="copied" /><CopyDocument v-else /></el-icon><span>{{ copied ? '已复制' : '复制' }}</span></button>
-        <template v-if="message.id && message.status === 'completed'">
+        <template v-if="message.id && message.status === 'completed' && !emptyAnswer">
         <el-button
           link
           size="small"
@@ -98,11 +101,12 @@
 </template>
 
 <script setup>
-import { onBeforeUnmount, ref } from 'vue'
+import { computed, onBeforeUnmount, ref } from 'vue'
 import { ElMessage } from 'element-plus'
 import { CaretBottom, CaretTop, Check, CopyDocument, Document, Loading, WarningFilled } from '@element-plus/icons-vue'
 import { chatApi } from '../../api/chat'
-import { renderMarkdown } from '../../utils/markdown'
+import { copyText } from '../../utils/clipboard'
+import MarkdownContent from './MarkdownContent.vue'
 import CitationCard from './CitationCard.vue'
 import DocumentPreview from '../DocumentPreview.vue'
 const originalPreview = ref(null)
@@ -113,6 +117,7 @@ const props = defineProps({
   canRetry: Boolean,
 })
 defineEmits(['feedback', 'retry'])
+const emptyAnswer = computed(() => props.message.status === 'completed' && !props.message.content?.trim())
 
 const historyDialogVisible = ref(false)
 const historyLoading = ref(false)
@@ -120,7 +125,7 @@ const historyCitations = ref([])
 const copied = ref(false)
 let copyTimer
 async function copyAnswer() {
-  try { await navigator.clipboard.writeText(props.message.content); copied.value = true; clearTimeout(copyTimer); copyTimer = setTimeout(() => { copied.value = false }, 1800) }
+  try { await copyText(props.message.content); copied.value = true; clearTimeout(copyTimer); copyTimer = setTimeout(() => { copied.value = false }, 1800) }
   catch { ElMessage.warning('复制未完成，请选中文字后复制。') }
 }
 onBeforeUnmount(() => clearTimeout(copyTimer))
@@ -141,6 +146,7 @@ async function loadHistoryCitations() {
 </script>
 
 <style scoped>
+.reasoning-panel { margin: 0 0 14px; border: 1px solid var(--line); border-radius: 9px; background: var(--canvas); }.reasoning-panel summary { cursor: pointer; padding: 12px 14px; color: var(--muted); font-size: 12px; min-height: 44px; }.reasoning-panel summary:focus-visible { outline: 2px solid var(--accent); outline-offset: 3px; border-radius: 8px; }.reasoning-panel summary .el-icon { margin-right: 6px; vertical-align: middle; }.reasoning-toggle { float: right; font-size: 11px; margin-left: 12px; }.reasoning-content { padding: 4px 14px 14px; color: var(--muted); font-size: 12px; line-height: 1.8; white-space: pre-wrap; overflow-wrap: anywhere; max-height: 320px; overflow-y: auto; }
 .message-item { width: 100%; min-width: 0; }.user .message-item { max-width: 85%; width: auto; }
 .bubble {
   padding: 17px 21px;

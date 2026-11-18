@@ -1,6 +1,6 @@
 """问答编排：改写 → 检索与相关性判断 → 知识库回答或普通对话流。
 
-返回 async generator：yield ("citations"|"token"|"usage", payload)
+返回 async generator：yield ("citations"|"reasoning"|"token"|"usage", payload)
 """
 import logging
 import hashlib
@@ -8,11 +8,12 @@ import json
 import uuid
 from typing import AsyncGenerator
 
-from langchain_core.output_parsers import StrOutputParser
 from langchain_core.messages import AIMessage, HumanMessage
 
+from app.core.exceptions import BusinessError
 from app.services.providers.embeddings import embed_with_cache
 from app.services.providers.llm import get_llm
+from app.services.providers.answer_stream import MAX_REASONING_CHARS, ThinkTagSplitter, reasoning_content, text_content
 from app.services.rag import cache
 from app.services.rag.condense import condense_question
 from app.services.rag.prompts import GENERAL_PROMPT, QA_PROMPT
@@ -59,7 +60,7 @@ async def run_qa_stream(
     history: list[dict],
     refresh: bool = False,
 ) -> AsyncGenerator[tuple[str, dict], None]:
-    """完整问答流。事件类型：citations / token / usage。"""
+    """完整问答流。事件类型：citations / reasoning / token / usage。"""
     # 1. 问题改写（带历史时）
     standalone = await condense_question(history, question)
 
@@ -70,7 +71,6 @@ async def run_qa_stream(
             query_embedding = (await embed_with_cache([standalone]))[0]
         except Exception as exc:
             logger.exception("embedding failed for question: %s", exc)
-            from app.core.exceptions import BusinessError
             raise BusinessError("retrieval_unavailable", "检索服务暂时不可用，请检查我的模型中的 Embedding 连接后重试", 503) from exc
         candidates = await hybrid_retrieve(standalone, session_kb_id, query_embedding)
         chunks = await select_relevant_chunks(standalone, candidates)
@@ -88,8 +88,10 @@ async def run_qa_stream(
     cached = None if refresh else await cache.get_cached_answer(standalone, cache_scope, model)
     yield "citations", {"citations": citations, "answer_mode": answer_mode,
                          "mode": _retrieval_mode_desc() if chunks else "general"}
-    if cached:
+    if cached and isinstance(cached.get("answer"), str) and cached["answer"].strip():
         answer = cached["answer"]
+        if get_model_settings().SHOW_REASONING and cached.get("reasoning_content"):
+            yield "reasoning", {"content": cached["reasoning_content"][:MAX_REASONING_CHARS]}
         # Cached answers use the freshly authorized sources emitted above.
         # 伪流式回放：按 24 字符分片
         for i in range(0, len(answer), 24):
@@ -98,26 +100,53 @@ async def run_qa_stream(
         return
 
     # 4. LLM 流式生成
-    chain = (QA_PROMPT if chunks else GENERAL_PROMPT) | get_llm() | StrOutputParser()
+    # 保留模型结束原因；转成纯字符串会丢失 length 等截断信号。
+    chain = (QA_PROMPT if chunks else GENERAL_PROMPT) | get_llm()
     messages = [HumanMessage(content=m["content"]) if m["role"] == "user" else AIMessage(content=m["content"])
                 for m in recent_history]
     full = []
+    thoughts = []
+    thought_length = 0
+    splitter = ThinkTagSplitter()
+    finish_reason = None
     try:
-        async for piece in chain.astream(
+        async for chunk in chain.astream(
             {"context": context, "question": question, "history": messages}
         ):
-            full.append(piece)
-            yield "token", {"content": piece}
+            finish_reason = chunk.response_metadata.get("finish_reason") or finish_reason
+            piece, tagged_thought = splitter.feed(text_content(chunk.content))
+            thought = reasoning_content(chunk) + tagged_thought
+            if get_model_settings().SHOW_REASONING and thought and thought_length < MAX_REASONING_CHARS:
+                thought = thought[:MAX_REASONING_CHARS - thought_length]
+                thoughts.append(thought)
+                thought_length += len(thought)
+                yield "reasoning", {"content": thought}
+            if piece:
+                full.append(piece)
+                yield "token", {"content": piece}
     except Exception:
         logger.exception("LLM stream failed")
         raise
 
+    tail, thought = splitter.finish()
+    if get_model_settings().SHOW_REASONING and thought and thought_length < MAX_REASONING_CHARS:
+        thought = thought[:MAX_REASONING_CHARS - thought_length]
+        thoughts.append(thought)
+        yield "reasoning", {"content": thought}
+    if tail:
+        full.append(tail)
+        yield "token", {"content": tail}
     answer = "".join(full)
-    if answer.strip():
-        await cache.set_cached_answer(
-            standalone, cache_scope, model,
-            answer, citations,
-        )
+    if finish_reason == "length" or not answer.strip():
+        logger.warning("Incomplete model answer: model=%s finish_reason=%s content_chars=%d", model, finish_reason, len(answer))
+    if finish_reason == "length":
+        raise BusinessError("answer_token_limit", "模型已达到输出长度上限，回答未完成。思考模型的推理也会占用额度，请在「我的模型」提高最大输出长度或换用非思考模型后重试。", 502)
+    if not answer.strip():
+        raise BusinessError("empty_answer", "模型没有返回回答正文，请重试；若使用思考模型，请在「我的模型」提高最大输出长度或换用非思考模型。", 502)
+    await cache.set_cached_answer(
+        standalone, cache_scope, model,
+        answer, citations, reasoning_content="".join(thoughts),
+    )
     yield "usage", {"cached": False, "model": model}
 
 

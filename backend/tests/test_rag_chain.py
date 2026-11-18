@@ -38,7 +38,7 @@ async def test_empty_retrieval_direct_answer(monkeypatch):
     """检索为空 → 对话模型直接回答，不附知识库引用。"""
     from langchain_core.language_models.fake_chat_models import FakeListChatModel
     monkeypatch.setattr(chain_module, 'get_llm', lambda: FakeListChatModel(responses=['你好，可以直接聊聊。']))
-    async def no_cache(*args):
+    async def no_cache(*args, **kwargs):
         return None
     monkeypatch.setattr(chain_module.cache, 'get_cached_answer', no_cache)
     monkeypatch.setattr(chain_module.cache, 'set_cached_answer', no_cache)

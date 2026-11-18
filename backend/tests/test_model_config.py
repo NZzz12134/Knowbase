@@ -29,6 +29,45 @@ def config_payload():
     return {"revision": 0, "llm": dict(endpoint), "embedding": dict(endpoint), "rerank": dict(endpoint), "rerank_enabled": True}
 
 
+async def test_personal_generation_options_persist_and_old_clients_keep_them(client, admin_token):
+    headers = {"Authorization": f"Bearer {admin_token}"}
+    data = config_payload()
+    data.update(max_output_tokens=32768, show_reasoning=False)
+    saved = await client.put('/api/v1/me/model-config', json=data, headers=headers)
+    assert saved.status_code == 200, saved.text
+    public = (await client.get('/api/v1/me/model-config', headers=headers)).json()
+    assert public['max_output_tokens'] == 32768 and public['show_reasoning'] is False
+    from app.core.security import decode_access_token
+    user_id = uuid.UUID(decode_access_token(admin_token)['sub'])
+    runtime = await service.load_model_settings(user_id)
+    with service.model_settings_scope(runtime):
+        from app.services.providers.llm import get_llm
+        assert get_llm().max_tokens == 32768
+        assert service.get_model_settings().SHOW_REASONING is False
+    old_client = config_payload()
+    old_client['revision'] = saved.json()['revision']
+    response = await client.put('/api/v1/me/model-config', json=old_client, headers=headers)
+    assert response.json()['max_output_tokens'] == 32768 and response.json()['show_reasoning'] is False
+    await client.delete('/api/v1/me/model-config', headers=headers)
+    cleared = (await client.get('/api/v1/me/model-config', headers=headers)).json()
+    assert cleared['show_reasoning'] is True and cleared['revision'] == 0
+
+
+@pytest.mark.parametrize('value', [0, 127, 131073, -1, 8192.5, True, '8192'])
+async def test_invalid_output_limit_is_rejected(client, admin_token, value):
+    data = config_payload()
+    data['max_output_tokens'] = value
+    response = await client.put('/api/v1/me/model-config', json=data, headers={"Authorization":f'Bearer {admin_token}'})
+    assert response.status_code == 422
+
+
+def test_legacy_generation_options_fall_back_without_changing_model():
+    config = config_payload()
+    runtime = service.runtime_settings(config)
+    assert runtime.LLM_MAX_TOKENS == service.get_settings().LLM_MAX_TOKENS
+    assert runtime.SHOW_REASONING is True and runtime.LLM_MODEL == config['llm']['model']
+
+
 async def test_personal_config_secret_round_trip(client, admin_token, db_session):
     headers = {"Authorization": f"Bearer {admin_token}"}
     data = config_payload()

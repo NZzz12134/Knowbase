@@ -31,6 +31,7 @@
 
 ```
 event: citations   data: {"citations":[{id,text,filename,page,row_start,row_end,heading_path,score}], "answer_mode":"knowledge", "mode":"hybrid+rerank"}
+event: reasoning   data: {"content":"模型返回的思考片段"} (可选，×N)
 event: token       data: {"content":"..."}    (×N)
 event: done        data: {"message_id":"..."}
 event: error       data: {"message":"..."}
@@ -39,6 +40,10 @@ event: error       data: {"message":"..."}
 限流 10/min/用户；全局并发 4。检索后通过对话模型判断候选片段相关性，只将相关片段用于回答并生成引用。没有相关片段或没有可用知识库时，发送 `citations: []`、`answer_mode: "general"`、`mode: "general"`，使用普通对话模型流式回答。多轮历史保留；检索用改写问题，最终回答用原问题和历史。检索或相关性判断服务故障会明确报错，不当作「资料无关」处理。
 
 历史消息包含 `answer_mode: knowledge|general|null`（旧记录为 null）。回答模式保存在现有 `token_usage` JSON 内，不需要新增数据库列。缓存按模式、原问题、改写问题、最近历史和当前授权片段隔离；重新生成会清理旧引用及模式，跳过答案缓存并重新判断相关性。
+
+模型未返回正文或以 `finish_reason=length` 结束时，发送 `event: error`，消息保存为 failed，保留已生成的部分正文，不发送 done、不写入答案缓存。最后一条失败回答可通过 `retry_message_id` 重试。思考过程不作为回答正文展示。
+
+`reasoning` 与正文 `token` 分开传递，仅在个人 `show_reasoning=true` 且模型返回思考时发送。历史消息新增 `reasoning_content`（默认空字符串），保存在现有 `token_usage` JSON 内；重新生成会清除旧思考，失败/中断保留已收到的思考，每条最多 200000 字符。思考不进入后续对话历史。个人 ZIP 的聊天 JSON 也包含该字段，恢复时保留。
 
 ## 知识库
 
@@ -85,6 +90,8 @@ event: error       data: {"message":"..."}
 {
   "revision": 0,
   "rerank_enabled": true,
+  "max_output_tokens": 16384,
+  "show_reasoning": true,
   "llm": {"mode": "ollama", "model": "qwen3:8b", "base_url": "http://localhost:11434", "protocol": "openai", "api_key": ""},
   "embedding": {"mode": "ollama", "model": "bge-m3:latest", "base_url": "http://localhost:11434", "protocol": "openai", "api_key": ""},
   "rerank": {"mode": "ollama", "model": "qwen3:8b", "base_url": "http://localhost:11434", "protocol": "openai", "api_key": ""}
@@ -92,6 +99,8 @@ event: error       data: {"message":"..."}
 ```
 
 `mode` 为 `api` / `ollama`。`api_key` 省略或 `null` 保留原密钥，`""` 清除；启用的 API 模型需有密钥。`rerank_enabled` 默认 false，关闭时可省略 `rerank` 或传 null，初次保存不会生成虚拟模型或地址。Rerank API 的 `protocol` 为 `openai`（通用 `/rerank`）或 `dashscope`（原生接口）；Ollama 使用本地对话模型做 JSON 相关性评分。保存返回新的 revision 与 embedding_changed；首次保存 embedding_changed 为 false，后续更换 Embedding 时需重新解析已有文档。
+
+`max_output_tokens` 为 128–131072 的整数，`show_reasoning` 为布尔值。省略或传 null 时保留原设置；旧记录缺字段时输出长度回退到安装默认值、思考展示默认 true。GET 和 PUT 的响应都包含这两个字段。设置按账号隔离并固定到每次请求快照，保存后新请求立即生效，旧请求继续使用旧值；输出上限还须符合服务商限制。API 使用兼容输出长度参数，Ollama 原生 `/api/chat` 使用 `options.num_predict`。关闭展示不强制禁用模型推理。
 
 ## 个人知识空间（需要登录）
 

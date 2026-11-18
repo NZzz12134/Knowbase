@@ -1,6 +1,6 @@
 <template>
   <div class="chat-layout">
-    <SessionSidebar :open="sidebarOpen" @close="sidebarOpen = false" @changed="onSessionChanged" />
+    <SessionSidebar :open="sidebarOpen" @close="sidebarOpen = false" @changed="onSessionChanged" @retry="initializeHistory" />
 
     <main id="main-content" tabindex="-1" class="chat-main" :inert="sidebarOpen">
       <header class="chat-header">
@@ -73,6 +73,7 @@ let loadSeq = 0 // loadMessages 竞态守卫：只接受最新一次请求的结
 let localMessageId = 0
 let displayedSessionId = null
 let scrollFrame = 0
+let historyInitController = null
 
 const kbs = ref([])
 const messageListRef = ref(null)
@@ -88,12 +89,23 @@ const currentKbName = computed(() => {
 const userInitial = computed(() => (auth.user?.username || '?').slice(0, 1).toUpperCase())
 const isStreaming = computed(() => streamingSessionId.value !== null)
 
-onMounted(async () => {
+onMounted(() => {
   // kb 列表只用于展示 tag，失败不应拖垮会话列表（独立容错）
   kbApi.list().then((data) => (kbs.value = data)).catch(() => {})
+  initializeHistory()
+})
 
+async function initializeHistory() {
+  historyInitController?.abort()
+  const controller = new AbortController()
+  historyInitController = controller
+  const selectionAtStart = sessionStore.currentId
+  const seqAtStart = loadSeq
+  isLoadingMessages.value = true
   try {
-    const sessions = await sessionStore.fetchSessions()
+    const sessions = await sessionStore.fetchSessions({ retry: true, signal: controller.signal })
+    // 离开页面或用户已选择/创建会话时，初始化响应不能覆盖新状态。
+    if (controller.signal.aborted || seqAtStart !== loadSeq || selectionAtStart !== sessionStore.currentId) return
     // 校验 currentId 仍在列表中（换账号登录等场景下可能残留），不在则纠正
     if (
       sessionStore.currentId &&
@@ -108,11 +120,11 @@ onMounted(async () => {
       await loadMessages(sessions[0].id)
     }
   } catch (_) {
-    /* 拦截器已提示 */
+    /* 侧边栏显示加载失败及重试入口。 */
   } finally {
-    isLoadingMessages.value = false
+    if (!controller.signal.aborted && seqAtStart === loadSeq) isLoadingMessages.value = false
   }
-})
+}
 
 /** 加载历史消息（带竞态守卫：快速切换会话时旧响应被丢弃） */
 async function loadMessages(sessionId) {
@@ -131,6 +143,7 @@ async function loadMessages(sessionId) {
 
 /** 侧边栏会话切换 / 新建 / 删除：中止不属于目标会话的流，重载消息区 */
 async function onSessionChanged(sessionId) {
+  historyInitController?.abort()
   sidebarOpen.value = false
   // 点击当前会话时保留正在流式更新的消息，避免历史响应覆盖它。
   if (sessionId && displayedSessionId === sessionId && streamingSessionId.value === sessionId) return
@@ -185,6 +198,7 @@ async function onSend(question, retryMessage = null) {
       _key: `local-${++localMessageId}`,
       role: 'assistant',
       content: '',
+      reasoning_content: '',
       status: 'generating',
       citations: [],
       feedback: null,
@@ -210,9 +224,13 @@ async function onSend(question, retryMessage = null) {
         } else if (ev.event === 'token') {
           assistantMsg.content += ev.data?.content || ''
           scrollToBottom(false)
+        } else if (ev.event === 'reasoning') {
+          assistantMsg.reasoning_content += ev.data?.content || ''
+          scrollToBottom(false)
         } else if (ev.event === 'done') {
           assistantMsg.id = ev.data?.message_id
-          assistantMsg.status = 'completed'
+          assistantMsg.status = assistantMsg.content.trim() ? 'completed' : 'failed'
+          if (assistantMsg.status === 'failed') assistantMsg.error_message = '模型没有返回回答正文，请重试或检查模型的输出长度设置。'
           assistantMsg.citations_count = assistantMsg.citations.length
         } else if (ev.event === 'error') {
           assistantMsg.status = 'failed'
@@ -224,8 +242,8 @@ async function onSend(question, retryMessage = null) {
     try {
       await promise
       if (assistantMsg.status === 'generating') {
-        assistantMsg.status = 'completed'
-        assistantMsg.citations_count = assistantMsg.citations.length
+        assistantMsg.status = 'failed'
+        assistantMsg.error_message = '回答连接已中断，请重试。'
       }
     } catch (err) {
       if (err.name === 'AbortError') {
@@ -283,7 +301,7 @@ function stopCurrentStream() {
   else currentStreamAbort?.()
 }
 
-onBeforeUnmount(() => { currentStreamAbort?.(); if (scrollFrame) cancelAnimationFrame(scrollFrame); loadSeq++ })
+onBeforeUnmount(() => { historyInitController?.abort(); currentStreamAbort?.(); if (scrollFrame) cancelAnimationFrame(scrollFrame); loadSeq++ })
 </script>
 
 <style scoped>
